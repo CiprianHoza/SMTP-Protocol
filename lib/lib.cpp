@@ -9,6 +9,8 @@
 #include <arpa/nameser.h>
 #include <resolv.h>
 #include <netinet/in.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #include "include/packet.h"
 
@@ -17,6 +19,7 @@ void error(int code)
 {
     if (code == -1)
         perror("Error send/receive fail!\n");
+    return;
 }
 
 void check_error(char* response)
@@ -28,6 +31,7 @@ void check_error(char* response)
     {
         sprintf(error, "%s bad response!\n", p);
         perror(error);
+        return;
     }
 }
 
@@ -52,14 +56,45 @@ void send_mail(int sockfd, email mail)
 
     check_error(response);
 
+    //Starting TLS
+    code = send(sockfd, "STARTTLS\r\n", 10, NULL);
+    error(code);
+
+    memset(response, 0, sizeof(response));
+    code = recv(sockfd, response, sizeof(response), NULL);
+    error(code);
+
+    check_error(response);
+
+    const SSL_METHOD* method = TLS_client_method();
+    SSL_CTX* ctx = SSL_CTX_new(method);
+    SSL* ssl = SSL_new(ctx);
+
+    SSL_set_fd(ssl, sockfd);
+    
+    if (SSL_connect(ssl) <= 0)
+    {
+        perror("TLS handshake has failed!\n");
+        return;
+    }
+
+    code = SSL_write(ssl, "EHLO localhost\r\n", 16);
+    error(code);
+
+    memset(response, 0, sizeof(response));
+    code = SSL_read(ssl, response, sizeof(response));
+    error(code);
+    
+    check_error(response);
+
     //Sending sender
     char cmd[256];
     sprintf(cmd, "MAIL FROM:<%s>\r\n", mail.anvelopa.sender.c_str());
-    code = send(sockfd, cmd, strlen(cmd), NULL);
+    code = SSL_write(ssl, cmd, strlen(cmd));
     error(code);
     
     memset(response, 0, sizeof(response));
-    code = recv(sockfd, response, sizeof(response), NULL);
+    code = SSL_read(ssl, response, sizeof(response));
     error(code);
 
     check_error(response);
@@ -71,22 +106,22 @@ void send_mail(int sockfd, email mail)
 
         sprintf(from, "RCPT TO:<%s>\r\n", rec.c_str());
 
-        code = send(sockfd, from, strlen(from), NULL);
+        code = SSL_write(ssl, from, strlen(from));
         error(code);
 
         memset(response, 0, sizeof(response));
-        code = recv(sockfd, response, sizeof(response), NULL);
+        code = SSL_read(ssl, response, sizeof(response));
         error(code);
 
         check_error(response);
     }
 
     //Sending DATA command
-    code = send(sockfd, "DATA\r\n", 6, NULL);
+    code = SSL_write(ssl, "DATA\r\n", 6);
     error(code);
 
     memset(response, 0, sizeof(response));
-    code = recv(sockfd, response, sizeof(response), NULL);
+    code = SSL_read(ssl, response, sizeof(response));
     error(code);
 
     check_error(response);
@@ -98,31 +133,35 @@ void send_mail(int sockfd, email mail)
 
         sprintf(mess, "%s: %s\r\n", pair.first.c_str(), pair.second.c_str());
 
-        code = send(sockfd, mess, strlen(mess), NULL);
+        code = SSL_write(ssl, mess, strlen(mess));
         error(code);
     }
 
     //Sending body
-    code = send(sockfd, "\r\n", 2, NULL);
+    code = SSL_write(ssl, "\r\n", 2);
     error(code);
 
     char message[1024];
     sprintf(message, "%s\r\n", mail.corp.body.c_str());
 
-    code = send(sockfd, message, strlen(message), NULL);
+    code = SSL_write(ssl, message, strlen(message));
     error(code);
 
-    code = send(sockfd, ".\r\n", 3, NULL);
+    code = SSL_write(ssl, ".\r\n", 3);
     error(code);
 
     memset(response, 0, sizeof(response));
-    code = recv(sockfd, response, sizeof(response), NULL);
+    code = SSL_read(ssl, response, sizeof(response));
     error(code);
 
     check_error(response);
 
     //Closing connection
-    code = send(sockfd, "QUIT\r\n", 6, NULL);
+    code = SSL_write(ssl, "QUIT\r\n", 6);
+
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
     close(sockfd);
 }
 

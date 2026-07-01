@@ -8,6 +8,8 @@
 #include <string_view>
 #include <resolv.h>
 #include <netdb.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #include "include/packet.h"
 #include "include/lib.h"
@@ -76,6 +78,9 @@ int main(void)
         for (auto& rec : usernames)
             temp.anvelopa.recipients.push_back(rec + "@" + domain);
 
+        SSL_library_init();
+        OpenSSL_add_all_algorithms();
+        SSL_load_error_strings();
         send_mail(sockfd, mail);
     }
     
