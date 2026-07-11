@@ -10,6 +10,7 @@
 #include <netdb.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <ctime>
 
 #include "include/packet.h"
 #include "include/lib.h"
@@ -37,6 +38,8 @@ int main(void)
     mail.anvelopa.recipients.push_back("1149j.test@inbox.testmail.app");
     mail.corp.headers["Subject"] = "test email";
     mail.corp.headers["From"] = "Ciprian Hoza <" + smtp_sender + ">";
+    mail.corp.headers["Message-ID"] = "<" + to_string(time(nullptr)) + "@test-projects.dev>";
+    mail.corp.headers["Date"] = get_date();
     mail.corp.body = "Acesta este inca un email de test mai lung de data aceasta!";
     //TEST MAIL
 

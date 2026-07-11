@@ -21,4 +21,7 @@ extern vector<string> get_mx_servers(const string& domain);
 //parse .env file
 extern void load_env(const string& filename = ".env");
 
+//get local date
+extern string get_date();
+
 #endif

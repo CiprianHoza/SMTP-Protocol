@@ -12,6 +12,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <fstream>
+#include <ctime>
 
 #include "include/packet.h"
 
@@ -278,4 +279,16 @@ void load_env(const string& filename = ".env")
 
         setenv(key.c_str(), value.c_str(), 1);
     }
+}
+
+string get_date()
+{
+    time_t now = time(nullptr);
+    tm* now_tm = localtime(&now);
+
+    char time[64];
+
+    strftime(time, sizeof(time), "%a, %d %b %Y %H:%M:%S %z", now_tm);
+
+    return string(time);
 }
