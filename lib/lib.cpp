@@ -11,6 +11,7 @@
 #include <netinet/in.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <fstream>
 
 #include "include/packet.h"
 
@@ -25,17 +26,16 @@ void error(int code)
 void check_error(char* response)
 {
     char *p = strtok(response, " ");
-    char error[20];
 
     if (strncmp(p, "250", 3) != 0 && strncmp(p, "354", 3) != 0 && strncmp(p, "220", 3) != 0)
     {
-        sprintf(error, "%s bad response!\n", p);
-        perror(error);
+        string error = string(p) + " bad response!\n";
+        cerr << error;
         return;
     }
 }
 
-void send_mail(int sockfd, email mail)
+void send_mail(int sockfd, email mail, string smtp_domain)
 {
     int code;
     char response[1024];
@@ -47,14 +47,18 @@ void send_mail(int sockfd, email mail)
     check_error(response);
 
     //Init connection
-    code = send(sockfd, "EHLO localhost\r\n", 16, NULL);
+    string init = "EHLO " + smtp_domain + "\r\n";
+    send(sockfd, init.c_str(), init.length(), NULL);
     error(code);
+    cout << "[SERVER] Sent EHLO\n";
 
     memset(response, 0, sizeof(response));
     code = recv(sockfd, response, sizeof(response), NULL);
     error(code);
 
     check_error(response);
+
+    cout << "[SERVER] Starting TLS...\n";
 
     //Starting TLS
     code = send(sockfd, "STARTTLS\r\n", 10, NULL);
@@ -78,7 +82,9 @@ void send_mail(int sockfd, email mail)
         return;
     }
 
-    code = SSL_write(ssl, "EHLO localhost\r\n", 16);
+    cout << "[SERVER] SSL configured\n";
+
+    code = SSL_write(ssl, init.c_str(), init.length());
     error(code);
 
     memset(response, 0, sizeof(response));
@@ -116,6 +122,8 @@ void send_mail(int sockfd, email mail)
         check_error(response);
     }
 
+    cout << "[SERVER] Sent recipients and sender\n";
+
     //Sending DATA command
     code = SSL_write(ssl, "DATA\r\n", 6);
     error(code);
@@ -137,6 +145,8 @@ void send_mail(int sockfd, email mail)
         error(code);
     }
 
+    cout << "[SERVER] Sent headers\n";
+
     //Sending body
     code = SSL_write(ssl, "\r\n", 2);
     error(code);
@@ -149,6 +159,8 @@ void send_mail(int sockfd, email mail)
 
     code = SSL_write(ssl, ".\r\n", 3);
     error(code);
+
+    cout << "[SERVER] Sent body\n";
 
     memset(response, 0, sizeof(response));
     code = SSL_read(ssl, response, sizeof(response));
@@ -163,6 +175,8 @@ void send_mail(int sockfd, email mail)
     SSL_free(ssl);
     SSL_CTX_free(ctx);
     close(sockfd);
+
+    cout << "[SERVER] Closed socket connection\n";
 }
 
 map<string, vector<string>> domains(vector<string> recipients)
@@ -237,4 +251,31 @@ vector<string> get_mx_servers(const string& domain)
     }
 
     return mx_servers;
+}
+
+void load_env(const string& filename = ".env")
+{
+    ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        perror("Could not open .env file!\n");
+        return;
+    }
+
+    string line;
+    while(getline(file, line))
+    {
+        if (line.empty() || line[0] == '#')
+            continue;
+
+        size_t delimitator = line.find('=');
+        if (delimitator == std::string::npos)
+            continue;
+        
+        string key = line.substr(0, delimitator);
+        string value = line.substr(delimitator + 1);
+
+        setenv(key.c_str(), value.c_str(), 1);
+    }
 }

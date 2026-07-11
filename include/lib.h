@@ -4,7 +4,7 @@
 #include "packet.h"
 
 //send email
-extern void send_mail(int sockfd, email mail);
+extern void send_mail(int sockfd, email mail, string smtp_domain);
 
 //error function after send/recv
 extern void error(int code);
@@ -17,5 +17,8 @@ extern map<string, vector<string>> domains(vector<string> recipients);
 
 //get mx servers from given domain
 extern vector<string> get_mx_servers(const string& domain);
+
+//parse .env file
+extern void load_env(const string& filename = ".env");
 
 #endif

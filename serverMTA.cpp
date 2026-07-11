@@ -14,8 +14,6 @@
 #include "include/packet.h"
 #include "include/lib.h"
 
-#define PORT "25"
-
 int main(void)
 {
     int sockfd;
@@ -23,14 +21,24 @@ int main(void)
 
     email mail;
 
-    mail.anvelopa.sender = "hoza.ciprian2016@gmail.com";
-    mail.anvelopa.recipients.push_back("ceva@example.com");
-    mail.anvelopa.recipients.push_back("altceva@gmail.com");
-    mail.anvelopa.recipients.push_back("hoza.ciprian2005@gmail.com");
-    mail.corp.headers["Subject"] = "test email";
-    mail.corp.headers["From"] = "hoza.ciprian2016@gmail.com";
-    mail.corp.body = "acesta este un mail de test";
+    load_env();
 
+    const char* env_domain = getenv("SMTP_DOMAIN");
+    const char* env_sender = getenv("SMTP_SENDER");
+    const char* env_port = getenv("SMTP_PORT");
+
+    string smtp_domain = string(env_domain);
+    string smtp_sender = string(env_sender);
+    string PORT = string(env_port);
+
+    //TEST MAIL
+    mail.anvelopa.sender = smtp_sender;
+    mail.anvelopa.recipients.push_back("hoza.ciprian2005@gmail.com");
+    mail.anvelopa.recipients.push_back("1149j.test@inbox.testmail.app");
+    mail.corp.headers["Subject"] = "test email";
+    mail.corp.headers["From"] = "Ciprian Hoza <" + smtp_sender + ">";
+    mail.corp.body = "Acesta este inca un email de test mai lung de data aceasta!";
+    //TEST MAIL
 
     map<string, vector<string>> domenii = domains(mail.anvelopa.recipients);
 
@@ -51,7 +59,7 @@ int main(void)
             hints.ai_family = AF_INET;
             hints.ai_socktype = SOCK_STREAM;
 
-            int code = getaddrinfo(server.c_str(), PORT, &hints, &result);
+            int code = getaddrinfo(server.c_str(), PORT.c_str(), &hints, &result);
             if (code != 0)
             {
                 result = NULL;
@@ -66,6 +74,7 @@ int main(void)
                 freeaddrinfo(result);
                 return 1;
             }
+            cout << "[SERVER] Socket connection established\n";
 
             freeaddrinfo(result);
             break;
@@ -81,7 +90,8 @@ int main(void)
         SSL_library_init();
         OpenSSL_add_all_algorithms();
         SSL_load_error_strings();
-        send_mail(sockfd, mail);
+        cout << "[SERVER] SSL library loaded. Sending mail...\n";
+        send_mail(sockfd, temp, smtp_domain);
     }
     
 
