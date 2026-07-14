@@ -180,6 +180,127 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     cout << "[SERVER] Closed socket connection\n";
 }
 
+email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
+{
+    int code;
+    char response[1024];
+
+    string mess = "220 " + smtp_domain + " ESMTP\r\n";
+
+    code = send(sockfd, mess.c_str(), mess.length(), NULL);
+    error(code);
+
+    memset(response, 0, sizeof(response));
+    code = recv(sockfd, response, sizeof(response) - 1, NULL);
+    error(code);
+
+    char *p = strtok(response, " \r\n");
+
+    if (p == NULL)
+    {
+        mess.clear();
+        mess = "500 Bad syntax\r\n";
+        code = send(sockfd, mess.c_str(), mess.length(), NULL);
+        error(code);
+
+        return email();
+    }
+
+    if (strncasecmp(p, "EHLO", 4) != 0)
+    {
+        mess.clear();
+        mess = "501 Syntax: Not EHLO\r\n";
+        code = send(sockfd, mess.c_str(), mess.length(), NULL);
+        error(code);
+
+        return email();
+    }
+
+    p = strtok(NULL, " \r\n");
+    if (p == NULL)
+    {
+        mess.clear();
+        mess = "501 Syntax: EHLO requires an argument\r\n";
+        code = send(sockfd, mess.c_str(), mess.length(), NULL);
+        error(code);
+
+        return email();
+    }
+
+    mess.clear();
+    mess = "250-" + smtp_domain + " Hello\r\n250 STARTTLS\r\n";
+    
+    code = send(sockfd, mess.c_str(), mess.length(), NULL);
+    error(code);
+
+    memset(response, 0, sizeof(response));
+    code = recv(sockfd, response, sizeof(response) - 1, NULL);
+
+    if (strncasecmp(response, "STARTTLS\r\n", 8) != 0)
+    {
+        mess.clear();
+        mess = "450 TLS Encryption required\r\n";
+        code = send(sockfd, mess.c_str(), mess.length(), NULL);
+
+        error(code);
+        close(sockfd);
+        return email();
+    }
+
+    mess.clear();
+    mess = "220 2.0.0 Ready to start TLS\r\n";
+    code = send(sockfd, mess.c_str(), mess.length(), NULL);
+    error(code);
+
+    SSL* ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, sockfd);
+
+    code = SSL_accept(ssl);
+
+    if (code <= 0)
+    {
+        ERR_print_errors_fp(stderr);
+        SSL_free(ssl);
+        close(sockfd);
+
+        return email();
+    }
+
+    //to do: start receiving email
+}
+
+SSL_CTX* init_server_ssl_context()
+{
+    const SSL_METHOD* method = TLS_server_method();
+    SSL_CTX* ctx = SSL_CTX_new(method);
+
+    if (!ctx)
+    {
+        perror("Couldn't create SSL context!");
+        exit(EXIT_FAILURE);
+    }
+
+    if (SSL_CTX_use_certificate_chain_file(ctx, "/etc/letsencrypt/live/chmail.test-projects.dev/fullchain.pem") <= 0)
+    {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(ctx, "/etc/letsencrypt/live/chmail.test-projects.dev/privkey.pem", SSL_FILETYPE_PEM) <= 0)
+    {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    if (!SSL_CTX_check_private_key(ctx))
+    {
+        fprintf(stderr, "Private key doesn't match with the certificate!\n");
+        exit(EXIT_FAILURE);
+    }
+
+    return ctx;
+}
+
 map<string, vector<string>> domains(vector<string> recipients)
 {
     map<string, vector<string>> domenii;
