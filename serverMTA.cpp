@@ -15,6 +15,10 @@
 #include "include/packet.h"
 #include "include/lib.h"
 
+extern "C" {
+    #include <spf2/spf.h>
+}
+
 int main(void)
 {
     int sockfd;

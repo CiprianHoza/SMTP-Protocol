@@ -14,7 +14,23 @@
 #include <fstream>
 #include <ctime>
 
+
 #include "include/packet.h"
+
+extern "C" {
+    #include <spf2/spf.h>
+}
+
+struct SPFvalidation
+{
+    bool is_valid;
+    string error_response = "";
+    string observation = "";
+};
+
+SPFvalidation address_validity(const char* auxx, int sockfd);
+string extract_address(string response);
+vector<string> get_mx_servers(const string& domain);
 
 
 void error(int code)
@@ -180,6 +196,40 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     cout << "[SERVER] Closed socket connection\n";
 }
 
+SPFvalidation is_ehlo_good(char response[])
+{
+    char *p = strtok(response, " \r\n");
+
+    SPFvalidation res;
+
+    if (p == NULL)
+    {
+        res.is_valid = false;
+        res.error_response = "500 Bad syntax\r\n";
+
+        return res;
+    }
+
+    if (strncasecmp(p, "EHLO", 4) != 0)
+    {
+        res.is_valid = false;
+        res.error_response = "501 Syntax: Not EHLO\r\n";
+
+        return res;
+    }
+
+    p = strtok(NULL, " \r\n");
+    if (p == NULL)
+    {
+        res.is_valid = false;
+        res.error_response = "501 Syntax: EHLO requires an argument\r\n";
+
+        return res;
+    }
+    
+    return res;
+}
+
 email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
 {
     int code;
@@ -194,36 +244,12 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
     code = recv(sockfd, response, sizeof(response) - 1, NULL);
     error(code);
 
-    char *p = strtok(response, " \r\n");
-
-    if (p == NULL)
+    SPFvalidation val = is_ehlo_good(response);
+    if (!val.is_valid)
     {
-        mess.clear();
-        mess = "500 Bad syntax\r\n";
-        code = send(sockfd, mess.c_str(), mess.length(), NULL);
+        code = send(sockfd, val.error_response.c_str(), val.error_response.length(), NULL);
         error(code);
-
-        return email();
-    }
-
-    if (strncasecmp(p, "EHLO", 4) != 0)
-    {
-        mess.clear();
-        mess = "501 Syntax: Not EHLO\r\n";
-        code = send(sockfd, mess.c_str(), mess.length(), NULL);
-        error(code);
-
-        return email();
-    }
-
-    p = strtok(NULL, " \r\n");
-    if (p == NULL)
-    {
-        mess.clear();
-        mess = "501 Syntax: EHLO requires an argument\r\n";
-        code = send(sockfd, mess.c_str(), mess.length(), NULL);
-        error(code);
-
+        close(sockfd);
         return email();
     }
 
@@ -266,7 +292,211 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
         return email();
     }
 
-    //to do: start receiving email
+    memset(response, 0, sizeof(response));
+    code = SSL_read(ssl, response, sizeof(response) - 1);
+    error(code);
+
+    val = is_ehlo_good(response);
+    if (!val.is_valid)
+    {
+        code = SSL_write(ssl, val.error_response.c_str(), val.error_response.length());
+        error(code);
+
+        SSL_free(ssl);
+        close(sockfd);
+        return email();
+    }
+
+    mess.clear();
+    mess = "250 OK\r\n";
+    
+    code = SSL_write(ssl, mess.c_str(), mess.length());
+    error(code);
+
+    memset(response, 0, sizeof(response));
+    code = SSL_read(ssl, response, sizeof(response) - 1);
+    error(code);
+
+    string address = extract_address(std::string(response));
+
+    if (address == "")
+    {
+        perror("Error trying to parse the sender's address\n");
+        mess.clear();
+        mess = "501 Unable to fetch the sender\r\n";
+        code = SSL_write(ssl, mess.c_str(), mess.length());
+        error(code);
+
+        SSL_free(ssl);
+        close(sockfd);
+        return email();
+    }
+
+    val = address_validity(address.c_str(), sockfd);
+
+    if (!val.is_valid)
+    {
+        code = SSL_write(ssl, val.error_response.c_str(), val.error_response.length());
+        SSL_free(ssl);
+        close(sockfd);
+
+        return email();
+    }
+
+    mess.clear();
+    mess = "250 2.1.0 OK\r\n";
+    code = SSL_write(ssl, mess.c_str(), mess.length());
+    error(code);
+
+    //to do rcpt to
+
+}
+
+string extract_address(string response)
+{
+    size_t start = response.find('<');
+    size_t stop = response.find('>');
+
+    if (start != std::string::npos && stop != std::string::npos && stop > start)
+        return response.substr(start + 1, stop - start - 1);
+
+    size_t colon = response.find(':');
+    if (colon != std::string::npos)
+    {
+        string suff = response.substr(colon + 1);
+        suff.erase(suff.find_last_not_of(" \r\n") + 1);
+        suff.erase(0, suff.find_first_not_of(" \r\n"));
+
+        return suff;
+    }
+    
+    return "";
+}
+
+SPFvalidation address_validity(const char* auxx, int sockfd)
+{
+    SPFvalidation res;
+    char *user = (char*)malloc((strlen(auxx) + 1) * sizeof(char));
+    char *domain = (char*)malloc((strlen(auxx) + 1) * sizeof(char));
+    char *aux;
+    char* address =(char*)malloc((strlen(auxx) + 1) * sizeof(char));
+
+    vector<string> mx_servers;
+    struct sockaddr_in addr;
+    socklen_t len;
+
+    SPF_server_t* spf_server = nullptr;
+    SPF_request_t* spf_request = nullptr;
+    SPF_response_t* spf_response = nullptr;
+    SPF_errcode_t err;
+    SPF_result_t result;
+
+    char ip[INET_ADDRSTRLEN];
+
+
+    strcpy(address, auxx);
+
+    if (strchr(address, '@') == NULL)
+    {
+        res.is_valid = false;
+        res.error_response = "501 5.1.7 Bad sender address syntax\r\n";
+        goto cleanup;
+    }
+
+    aux = strtok(address, "@");
+    if (aux == NULL)
+    {
+        res.is_valid = false;
+        res.error_response = "501 5.1.7 Bad sender address syntax\r\n";
+        goto cleanup;
+    }
+    strcpy(user, aux);
+    aux = strtok(NULL, "@");
+    if (aux == NULL)
+    {
+        res.is_valid = false;
+        res.error_response = "501 5.1.7 Bad sender address syntax\r\n";
+        goto cleanup;
+    }
+    strcpy(domain, aux);
+
+    aux = strtok(NULL, "@");
+    if (aux != NULL)
+    {
+        res.is_valid = false;
+        res.error_response = "501 5.1.7 Bad sender address syntax\r\n";
+        goto cleanup;
+    }
+
+    mx_servers = get_mx_servers(std::string(domain));
+    
+    if (mx_servers.size() == 0)
+    {
+        res.is_valid = false;
+        res.error_response = "450 4.1.8 Sender address rejected: Domain not found\r\n";
+        goto cleanup;
+    }
+    
+    len = sizeof(addr);
+    if (getpeername(sockfd, (struct sockaddr*)&addr, &len) < 0)
+    {
+        perror("Could not get the IP address of the client!\n");
+        res.is_valid = false;
+        res.error_response = "550 Error trying to verify the SPF authentication\r\n";
+        goto cleanup;
+    }
+
+    spf_server = SPF_server_new(SPF_DNS_CACHE, 0);
+    if (spf_server == nullptr) {
+        res.is_valid = false;
+        res.error_response = "550 Internal SPF server error\r\n";
+        goto cleanup;
+    }
+
+    spf_request = SPF_request_new(spf_server);
+    if (spf_request == nullptr) {
+        res.is_valid = false;
+        res.error_response = "550 Internal SPF request error\r\n";
+        goto cleanup;
+    }
+
+    SPF_request_set_helo_dom(spf_request, domain);
+
+    inet_ntop(AF_INET, &(addr.sin_addr), ip, INET_ADDRSTRLEN);
+    SPF_request_set_ipv4_str(spf_request, ip);
+
+    err = SPF_request_query_mailfrom(spf_request, &spf_response);
+
+    if (err != SPF_E_SUCCESS)
+    {
+        perror("Error trying to verify the SPF authentication\n");
+        res.is_valid = false;
+        res.error_response = "550 Error trying to verify the SPF authentication\r\n";
+
+        goto cleanup;
+    }
+
+    result = SPF_response_result(spf_response);
+
+    if (result == SPF_RESULT_FAIL)
+    {
+        res.is_valid = false;
+        res.error_response = "550 5.7.1 SPF authentication failed\r\n";
+        goto cleanup;
+    }
+    else if (result != SPF_RESULT_PASS)
+        res.observation = "SPF result unsure";
+
+    // to do :reverse dns
+
+    cleanup:
+        if (spf_response) SPF_response_free(spf_response);
+        if (spf_request) SPF_request_free(spf_request);
+        if (spf_server) SPF_server_free(spf_server);
+        free(user);
+        free(domain);
+        free(address);
+        return res;
 }
 
 SSL_CTX* init_server_ssl_context()
