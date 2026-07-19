@@ -28,9 +28,16 @@ struct SPFvalidation
     string observation = "";
 };
 
+struct MAILaddress
+{
+    string domain = "";
+    string username = "";
+};
+
 SPFvalidation address_validity(const char* auxx, int sockfd);
 string extract_address(string response);
 vector<string> get_mx_servers(const string& domain);
+MAILaddress split_address(const char* auxx);
 
 
 void error(int code)
@@ -234,6 +241,7 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
 {
     int code;
     char response[1024];
+    email mail;
 
     string mess = "220 " + smtp_domain + " ESMTP\r\n";
 
@@ -313,6 +321,7 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
     code = SSL_write(ssl, mess.c_str(), mess.length());
     error(code);
 
+    //MAIL FROM
     memset(response, 0, sizeof(response));
     code = SSL_read(ssl, response, sizeof(response) - 1);
     error(code);
@@ -343,13 +352,66 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
         return email();
     }
 
+    mail.anvelopa.sender = address;
+
     mess.clear();
     mess = "250 2.1.0 OK\r\n";
     code = SSL_write(ssl, mess.c_str(), mess.length());
     error(code);
 
-    //to do rcpt to
+    //RCPT TO WILL NOT HAVE A DATABASE JUST NOW (ONLY TESTING THE RECEIVING MECHANISM)
+    MAILaddress adresa;
 
+    do
+    {
+        memset(response, 0, sizeof(response));
+        code = SSL_read(ssl, response, sizeof(response) - 1);
+        error(code);
+        
+        if (strncasecmp(response, "DATA", 4) == 0)
+            break;
+        
+        address = extract_address(string(response));
+
+        if (address == "")
+        {
+            perror("Error trying to parse the recipient's address\n");
+            mess.clear();
+            mess = "501 Unable to fetch the recipient\r\n";
+            code = SSL_write(ssl, mess.c_str(), mess.length());
+            error(code);
+
+            SSL_free(ssl);
+            close(sockfd);
+            return email();
+        }
+
+        adresa.domain.clear();
+        adresa.username.clear();
+        adresa = split_address(address.c_str());
+
+        if (adresa.domain != smtp_domain)
+        {
+            mess.clear();
+            mess = "550 This server does not operate with the given domain\r\n";
+            code = SSL_write(ssl, mess.c_str(), mess.length());
+            error(code);
+
+            SSL_free(ssl);
+            close(sockfd);
+            return email();
+        }
+
+        mail.anvelopa.recipients.push_back(string(address));
+
+        mess.clear();
+        mess = "250 2.1.5 Recipient OK\r\n";
+        code = SSL_write(ssl, mess.c_str(), mess.length());
+        error(code);
+
+    } while (strcasestr(response, "RCPT TO") != NULL);
+
+    //to do DATA
 }
 
 string extract_address(string response)
@@ -376,10 +438,7 @@ string extract_address(string response)
 SPFvalidation address_validity(const char* auxx, int sockfd)
 {
     SPFvalidation res;
-    char *user = (char*)malloc((strlen(auxx) + 1) * sizeof(char));
-    char *domain = (char*)malloc((strlen(auxx) + 1) * sizeof(char));
-    char *aux;
-    char* address =(char*)malloc((strlen(auxx) + 1) * sizeof(char));
+    MAILaddress adresa;
 
     vector<string> mx_servers;
     struct sockaddr_in addr;
@@ -400,44 +459,20 @@ SPFvalidation address_validity(const char* auxx, int sockfd)
 
     //Address syntax check
 
-    strcpy(address, auxx);
+    adresa = split_address(auxx);
 
-    if (strchr(address, '@') == NULL)
+    if (adresa.domain == "" && adresa.username == "")
     {
         res.is_valid = false;
         res.error_response = "501 5.1.7 Bad sender address syntax\r\n";
         goto cleanup;
     }
-
-    aux = strtok(address, "@");
-    if (aux == NULL)
-    {
-        res.is_valid = false;
-        res.error_response = "501 5.1.7 Bad sender address syntax\r\n";
-        goto cleanup;
-    }
-    strcpy(user, aux);
-    aux = strtok(NULL, "@");
-    if (aux == NULL)
-    {
-        res.is_valid = false;
-        res.error_response = "501 5.1.7 Bad sender address syntax\r\n";
-        goto cleanup;
-    }
-    strcpy(domain, aux);
-
-    aux = strtok(NULL, "@");
-    if (aux != NULL)
-    {
-        res.is_valid = false;
-        res.error_response = "501 5.1.7 Bad sender address syntax\r\n";
-        goto cleanup;
-    }
+    
     /*
     END SYNTAX CHECK
     SPF validation
     */
-    mx_servers = get_mx_servers(std::string(domain));
+    mx_servers = get_mx_servers(std::string(adresa.domain));
     
     if (mx_servers.size() == 0)
     {
@@ -469,7 +504,7 @@ SPFvalidation address_validity(const char* auxx, int sockfd)
         goto cleanup;
     }
 
-    SPF_request_set_helo_dom(spf_request, domain);
+    SPF_request_set_helo_dom(spf_request, adresa.domain.c_str());
 
     inet_ntop(AF_INET, &(addr.sin_addr), ip, INET_ADDRSTRLEN);
     SPF_request_set_ipv4_str(spf_request, ip);
@@ -544,10 +579,46 @@ SPFvalidation address_validity(const char* auxx, int sockfd)
         if (spf_response) SPF_response_free(spf_response);
         if (spf_request) SPF_request_free(spf_request);
         if (spf_server) SPF_server_free(spf_server);
+        return res;
+}
+
+MAILaddress split_address(const char* auxx)
+{
+    char *user = (char*)malloc((strlen(auxx) + 1) * sizeof(char));
+    char *domain = (char*)malloc((strlen(auxx) + 1) * sizeof(char));
+    char *aux;
+    char* address = (char*)malloc((strlen(auxx) + 1) * sizeof(char));
+
+    MAILaddress adresa;
+
+    strcpy(address, auxx);
+
+    if (strchr(address, '@') == NULL)
+        goto cleanup;
+
+    aux = strtok(address, "@");
+    if (aux == NULL)
+        goto cleanup;
+
+    strcpy(user, aux);
+    aux = strtok(NULL, "@");
+    if (aux == NULL)
+        goto cleanup;
+
+    strcpy(domain, aux);
+
+    aux = strtok(NULL, "@");
+    if (aux != NULL)
+        goto cleanup;
+
+    adresa.domain = string(domain);
+    adresa.username = string(user);
+
+    cleanup:
         free(user);
         free(domain);
         free(address);
-        return res;
+        return adresa;
 }
 
 SSL_CTX* init_server_ssl_context()
