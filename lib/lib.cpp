@@ -391,8 +391,14 @@ SPFvalidation address_validity(const char* auxx, int sockfd)
     SPF_errcode_t err;
     SPF_result_t result;
 
+    char hostname[NI_MAXHOST];
+    struct addrinfo hints;
+    struct addrinfo* res_addr = nullptr;
+    bool rdns_match = false;
+
     char ip[INET_ADDRSTRLEN];
 
+    //Address syntax check
 
     strcpy(address, auxx);
 
@@ -427,7 +433,10 @@ SPFvalidation address_validity(const char* auxx, int sockfd)
         res.error_response = "501 5.1.7 Bad sender address syntax\r\n";
         goto cleanup;
     }
-
+    /*
+    END SYNTAX CHECK
+    SPF validation
+    */
     mx_servers = get_mx_servers(std::string(domain));
     
     if (mx_servers.size() == 0)
@@ -486,8 +495,50 @@ SPFvalidation address_validity(const char* auxx, int sockfd)
     }
     else if (result != SPF_RESULT_PASS)
         res.observation = "SPF result unsure";
+    
+    /*
+    END SPF VALIDATION
+    Reverse DNS check
+    */
 
-    // to do :reverse dns
+    if (getnameinfo((struct sockaddr*)&addr, len, hostname, sizeof(hostname), NULL, 0, NI_NAMEREQD) != 0)
+    {
+        res.observation += "\nReverse DNS failed: No PTR record found";
+        goto cleanup;
+    }
+    else
+    {
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+
+        if (getaddrinfo(hostname, NULL, &hints, &res_addr) == 0)
+        {
+            struct addrinfo* curr;
+
+            for (curr = res_addr; curr != nullptr; curr = curr -> ai_next)
+            {
+                struct sockaddr_in* saddr = (struct sockaddr_in*)curr->ai_addr;
+                
+                if (saddr->sin_addr.s_addr == addr.sin_addr.s_addr)
+                {
+                    rdns_match = true;
+                    break;
+                }
+            }
+
+            freeaddrinfo(res_addr);
+        }
+
+        if (!rdns_match)
+        {
+            res.observation += "\nFCrDNS mismatch: " + string(hostname) + " does not point back to the client IP";
+            goto cleanup;
+        }
+    }
+    //END rDNS CHECK
+
+    res.is_valid = true;
 
     cleanup:
         if (spf_response) SPF_response_free(spf_response);
