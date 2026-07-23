@@ -42,7 +42,7 @@ MAILaddress split_address(const char* auxx);
 
 void error(int code)
 {
-    if (code == -1)
+    if (code <= 0)
         perror("Error send/receive fail!\n");
     return;
 }
@@ -411,7 +411,107 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
 
     } while (strcasestr(response, "RCPT TO") != NULL);
 
-    //to do DATA
+
+    mess.clear();
+    mess = "354 Start mail input; end with <CR><LF>.<CR><LF>\r\n";
+    code = SSL_write(ssl, mess.c_str(), mess.length());
+    error(code);
+
+    string raw_email = "";
+    char chunk[4096];
+
+    while(true)
+    {
+        memset(chunk, 0, sizeof(chunk));
+        code = SSL_read(ssl, chunk, sizeof(chunk) - 1);
+        error(code);
+
+        raw_email.append(chunk, code);
+
+        if (raw_email.length() >= 5 && raw_email.compare(raw_email.length() - 5, 5, "\r\n.\r\n") == 0)
+            break;
+    }
+
+    raw_email.erase(raw_email.length() - 5);
+
+    //EMAIL PARSING
+
+    size_t header_end = raw_email.find("\r\n\r\n");
+
+    if (header_end == string::npos)
+    {
+        perror("Email structure is wrong\n");
+
+        mess.clear();
+        mess = "450 Email structure is wrong\r\n";
+        code = SSL_write(ssl, mess.c_str(), mess.length());
+        error(code);
+
+        SSL_free(ssl);
+        close(sockfd);
+        return email();
+    }
+
+    string headers = "";
+    string body = "";
+
+    if (header_end != string::npos)
+    {
+        headers = raw_email.substr(0, header_end);
+        body = raw_email.substr(header_end + 4);
+    }
+
+    stringstream ss(headers);
+    string line;
+    string last_key = "";
+
+    while(getline(ss, line))
+    {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        
+        if ((line[0] == ' ' || line[0] == '\t') && !last_key.empty())
+        {
+            size_t start = line.find_first_not_of(" \t");
+            if (start != string::npos)
+                mail.corp.headers[last_key] += " " + line.substr(start);
+
+            continue;
+        }
+
+        size_t colon = line.find(':');
+
+        if (colon != string::npos)
+        {
+            string key = line.substr(0, colon);
+            string value = line.substr(colon + 1);
+
+            size_t val_start = value.find_first_not_of(" \t");
+            if (val_start != string::npos)
+                value = value.substr(val_start);
+            else
+                value = "";
+            
+            last_key = key;
+            mail.corp.headers[key] = value;
+        }
+    }
+
+    mail.corp.body = body;
+
+    mess.clear();
+    mess = "250 2.0.0 OK (Mail accepted for delivery)\r\n";
+    code = SSL_write(ssl, mess.c_str(), mess.length());
+    error(code);
+
+    memset(response, 0, sizeof(response));
+    code = SSL_read(ssl, response, sizeof(response) - 1);
+    error(code);
+
+    SSL_free(ssl);
+    close(sockfd);
+    
+    return mail;
 }
 
 string extract_address(string response)
