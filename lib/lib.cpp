@@ -252,6 +252,8 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
     code = recv(sockfd, response, sizeof(response) - 1, NULL);
     error(code);
 
+    cout<<"[SERVER] Sent hello message\n";
+
     SPFvalidation val = is_ehlo_good(response);
     if (!val.is_valid)
     {
@@ -285,6 +287,8 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
     mess = "220 2.0.0 Ready to start TLS\r\n";
     code = send(sockfd, mess.c_str(), mess.length(), NULL);
     error(code);
+
+    cout<<"[SERVER] Starting TLS...\n";
 
     SSL* ssl = SSL_new(ctx);
     SSL_set_fd(ssl, sockfd);
@@ -321,6 +325,8 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
     code = SSL_write(ssl, mess.c_str(), mess.length());
     error(code);
 
+    cout<<"[SERVER] TLS established!\n";
+
     //MAIL FROM
     memset(response, 0, sizeof(response));
     code = SSL_read(ssl, response, sizeof(response) - 1);
@@ -351,6 +357,10 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
 
         return email();
     }
+
+    cout<<"[SERVER] Sender received!\n";
+
+    //to do spams
 
     mail.anvelopa.sender = address;
 
@@ -411,6 +421,7 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
 
     } while (strcasestr(response, "RCPT TO") != NULL);
 
+    cout<<"[SERVER] Recipients received!\n";
 
     mess.clear();
     mess = "354 Start mail input; end with <CR><LF>.<CR><LF>\r\n";
@@ -433,6 +444,8 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
     }
 
     raw_email.erase(raw_email.length() - 5);
+
+    cout<<"[SERVER] Raw email received!\n";
 
     //EMAIL PARSING
 
@@ -503,6 +516,8 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
     mess = "250 2.0.0 OK (Mail accepted for delivery)\r\n";
     code = SSL_write(ssl, mess.c_str(), mess.length());
     error(code);
+
+    cout<<"[SERVER] Mail accepted!\n";
 
     memset(response, 0, sizeof(response));
     code = SSL_read(ssl, response, sizeof(response) - 1);

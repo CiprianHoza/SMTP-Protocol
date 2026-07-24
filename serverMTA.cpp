@@ -6,11 +6,14 @@
 #include <sys/types.h>
 #include <ranges>
 #include <string_view>
+#include <arpa/nameser.h>
 #include <resolv.h>
-#include <netdb.h>
+#include <netinet/in.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <fstream>
 #include <ctime>
+
 
 #include "include/packet.h"
 #include "include/lib.h"
@@ -22,9 +25,7 @@ extern "C" {
 int main(void)
 {
     int sockfd;
-    struct sockaddr_in serveraddr;
-
-    email mail;
+    struct sockaddr_in serv;
 
     load_env();
 
@@ -36,71 +37,71 @@ int main(void)
     string smtp_sender = string(env_sender);
     string PORT = string(env_port);
 
-    //TEST MAIL
-    mail.anvelopa.sender = smtp_sender;
-    mail.anvelopa.recipients.push_back("hoza.ciprian2005@gmail.com");
-    mail.anvelopa.recipients.push_back("1149j.test@inbox.testmail.app");
-    mail.corp.headers["Subject"] = "test email";
-    mail.corp.headers["From"] = "Ciprian Hoza <" + smtp_sender + ">";
-    mail.corp.headers["Message-ID"] = "<" + to_string(time(nullptr)) + "@test-projects.dev>";
-    mail.corp.headers["Date"] = get_date();
-    mail.corp.body = "Acesta este inca un email de test mai lung de data aceasta!";
-    //TEST MAIL
+    memset(&serv, 0, sizeof(serv));
 
-    map<string, vector<string>> domenii = domains(mail.anvelopa.recipients);
+    serv.sin_family = AF_INET;
+    serv.sin_port = htons(stoi(PORT));
+    serv.sin_addr.s_addr = INADDR_ANY;
 
-    for (auto& [domain, usernames] : domenii)
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (sockfd == -1)
     {
-        vector<string> mx_servers = get_mx_servers(domain);
-
-        if (mx_servers.size() == 0)
-        {
-            perror("Could not find a MX server!\n");
-            return 1;
-        }
-
-        struct addrinfo hints, *result;
-        for (auto& server : mx_servers)
-        {
-            memset(&hints, 0, sizeof(hints));
-            hints.ai_family = AF_INET;
-            hints.ai_socktype = SOCK_STREAM;
-
-            int code = getaddrinfo(server.c_str(), PORT.c_str(), &hints, &result);
-            if (code != 0)
-            {
-                result = NULL;
-                continue;
-            }
-
-            sockfd = socket(AF_INET, SOCK_STREAM, result->ai_protocol);
-
-            if (connect(sockfd, result->ai_addr, result->ai_addrlen) < 0)
-            {
-                perror("Cannot connect to the given SMTP destination!");
-                freeaddrinfo(result);
-                return 1;
-            }
-            cout << "[SERVER] Socket connection established\n";
-
-            freeaddrinfo(result);
-            break;
-        }
-
-        email temp = mail;
-
-        temp.anvelopa.recipients.clear();
-
-        for (auto& rec : usernames)
-            temp.anvelopa.recipients.push_back(rec + "@" + domain);
-
-        SSL_library_init();
-        OpenSSL_add_all_algorithms();
-        SSL_load_error_strings();
-        cout << "[SERVER] SSL library loaded. Sending mail...\n";
-        send_mail(sockfd, temp, smtp_domain);
+        perror("[SERVER] Error trying to create the server socket!\n");
+        return -1;
     }
-    
 
+    int op = 1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &op, sizeof(op));
+
+
+    if (bind(sockfd, (struct sockaddr*)&serv, sizeof(serv)) < 0)
+    {
+        perror("[SERVER] Error trying to bind the server socket!\n");
+        return -1;
+    }
+
+    if (listen(sockfd, SOMAXCONN) < 0)
+    {
+        perror("[SERVER] Listen failed!\n");
+        return -1;
+    }
+
+    SSL_CTX* ctx = init_server_ssl_context();
+    while(true)
+    {
+        struct sockaddr_in client;
+        socklen_t client_len = sizeof(client);
+
+        int client_fd = accept(sockfd, (struct sockaddr*)&client, &client_len);
+
+        if (client_fd < 0)
+        {
+            perror("[SERVER] Error on connect!\n");
+            continue;
+        }
+
+        email mail = receive_email(client_fd, ctx, smtp_domain);
+
+        //TEST
+        if (mail.anvelopa.sender.empty())
+        {
+            cout<<"nu a mers\n";
+            continue;
+        }
+
+        cout<<mail.anvelopa.sender<<'\n';
+        cout<<mail.anvelopa.recipients[0]<<'\n';
+
+        for (auto& [key, value] : mail.corp.headers)
+        {
+            cout<<key<<": "<<value<<'\n'; 
+        }
+
+        cout<<mail.corp.body<<'\n'<<'\n';
+
+    }
+
+    close(sockfd);
     return 0;
 }
