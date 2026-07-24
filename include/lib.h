@@ -7,7 +7,7 @@
 extern void send_mail(int sockfd, email mail, string smtp_domain);
 
 //receive email
-extern email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain);
+extern email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_domain);
 
 //error function after send/recv
 extern void error(int code);

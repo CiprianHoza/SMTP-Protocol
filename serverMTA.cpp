@@ -32,10 +32,12 @@ int main(void)
     const char* env_domain = getenv("SMTP_DOMAIN");
     const char* env_sender = getenv("SMTP_SENDER");
     const char* env_port = getenv("SMTP_PORT");
+    const char* env_mail_domain = getenv("MAIL_DOMAIN");
 
     string smtp_domain = string(env_domain);
     string smtp_sender = string(env_sender);
     string PORT = string(env_port);
+    string mail_domain = string(env_mail_domain);
 
     memset(&serv, 0, sizeof(serv));
 
@@ -81,7 +83,7 @@ int main(void)
             continue;
         }
 
-        email mail = receive_email(client_fd, ctx, smtp_domain);
+        email mail = receive_email(client_fd, ctx, smtp_domain, mail_domain);
 
         //TEST
         if (mail.anvelopa.sender.empty())

@@ -233,11 +233,13 @@ SPFvalidation is_ehlo_good(char response[])
 
         return res;
     }
+
+    res.is_valid = true;
     
     return res;
 }
 
-email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
+email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_domain)
 {
     int code;
     char response[1024];
@@ -400,7 +402,7 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain)
         adresa.username.clear();
         adresa = split_address(address.c_str());
 
-        if (adresa.domain != smtp_domain)
+        if (adresa.domain != mail_domain)
         {
             mess.clear();
             mess = "550 This server does not operate with the given domain\r\n";
