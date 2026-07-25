@@ -389,7 +389,13 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
 
     cout<<"[SERVER] Sender received!\n";
 
-    //to do spams
+    if (val.observation != "")
+    {
+        mail.corp.headers["X-Spam-Flag"] = "YES";
+        mail.corp.headers["X-Spam-Mess"] = val.observation;
+    }
+    else
+        mail.corp.headers["X-Spam-Flag"] = "NO";
 
     mail.anvelopa.sender = address;
 
