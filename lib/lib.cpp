@@ -13,6 +13,7 @@
 #include <openssl/err.h>
 #include <fstream>
 #include <ctime>
+#include <stdexcept>
 
 
 #include "include/packet.h"
@@ -43,19 +44,24 @@ MAILaddress split_address(const char* auxx);
 void error(int code)
 {
     if (code <= 0)
+    {
         perror("Error send/receive fail!\n");
-    return;
+        throw std::runtime_error("Network I/O failure");
+    }
 }
 
 void check_error(char* response)
 {
+    if (!response || strlen(response) < 3)
+        throw std::runtime_error("Invalid response");
+
     char *p = strtok(response, " ");
 
     if (strncmp(p, "250", 3) != 0 && strncmp(p, "354", 3) != 0 && strncmp(p, "220", 3) != 0)
     {
         string error = string(p) + " bad response!\n";
         cerr << error;
-        return;
+        throw std::runtime_error("SMTP error");
     }
 }
 
@@ -64,7 +70,12 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     int code;
     char response[1024];
 
-    memset(response, 0, sizeof(response));
+    SSL* ssl = nullptr;
+    SSL_CTX* ctx = nullptr;
+
+    try
+    {
+        memset(response, 0, sizeof(response));
     code = recv(sockfd, response, sizeof(response), NULL);
     error(code);
 
@@ -95,8 +106,8 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     check_error(response);
 
     const SSL_METHOD* method = TLS_client_method();
-    SSL_CTX* ctx = SSL_CTX_new(method);
-    SSL* ssl = SSL_new(ctx);
+    ctx = SSL_CTX_new(method);
+    ssl = SSL_new(ctx);
 
     SSL_set_fd(ssl, sockfd);
     
@@ -201,6 +212,18 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     close(sockfd);
 
     cout << "[SERVER] Closed socket connection\n";
+    }
+    catch(const std::exception& e)
+    {
+        cerr<<"[MTA Client error] "<<e.what()<<'\n';
+
+        if (ssl)
+        {
+            SSL_free(ssl);
+            SSL_CTX_free(ctx);
+        }
+        close(sockfd);
+    }   
 }
 
 SPFvalidation is_ehlo_good(char response[])
@@ -245,9 +268,13 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
     char response[1024];
     email mail;
 
+    SSL* ssl = nullptr;
+
     string mess = "220 " + smtp_domain + " ESMTP\r\n";
 
-    code = send(sockfd, mess.c_str(), mess.length(), NULL);
+    try
+    {
+        code = send(sockfd, mess.c_str(), mess.length(), NULL);
     error(code);
 
     memset(response, 0, sizeof(response));
@@ -292,7 +319,7 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
 
     cout<<"[SERVER] Starting TLS...\n";
 
-    SSL* ssl = SSL_new(ctx);
+    ssl = SSL_new(ctx);
     SSL_set_fd(ssl, sockfd);
 
     code = SSL_accept(ssl);
@@ -527,6 +554,17 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
 
     SSL_free(ssl);
     close(sockfd);
+    }
+    catch(const std::exception& e)
+    {
+        cerr<<"[MTA Server error] "<<e.what()<<'\n';
+
+        if (ssl)
+            SSL_free(ssl);
+        close(sockfd);
+
+        return email();
+    }
     
     return mail;
 }
