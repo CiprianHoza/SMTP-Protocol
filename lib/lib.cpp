@@ -15,6 +15,7 @@
 #include <fstream>
 #include <ctime>
 #include <stdexcept>
+#include <mysql/mysql.h>
 
 
 #include "include/packet.h"
@@ -36,10 +37,20 @@ struct MAILaddress
     string username = "";
 };
 
+struct db_config
+{
+    string host = "127.0.0.1";
+    string user = "";
+    string password = "";
+    string db_name = "";
+    unsigned int port = 3306;
+};
+
 SPFvalidation address_validity(const char* auxx, int sockfd);
 string extract_address(string response);
 vector<string> get_mx_servers(const string& domain);
 MAILaddress split_address(const char* auxx);
+bool valid_email(string address, db_config& db);
 
 
 void error(int code)
@@ -407,6 +418,7 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
 
     //RCPT TO WILL NOT HAVE A DATABASE JUST NOW (ONLY TESTING THE RECEIVING MECHANISM)
     MAILaddress adresa;
+    db_config db;
 
     do
     {
@@ -448,12 +460,22 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
             return email();
         }
 
-        mail.anvelopa.recipients.push_back(string(address));
+        if (!valid_email(address, db))
+        {
+            mess.clear();
+            mess = "550 5.1.1 <" + address + ">: User unknown\r\n";
+            code = SSL_write(ssl, mess.c_str(), mess.length());
+            error(code);
+        }
+        else 
+        {
+            mail.anvelopa.recipients.push_back(string(address));
 
-        mess.clear();
-        mess = "250 2.1.5 Recipient OK\r\n";
-        code = SSL_write(ssl, mess.c_str(), mess.length());
-        error(code);
+            mess.clear();
+            mess = "250 2.1.5 Recipient OK\r\n";
+            code = SSL_write(ssl, mess.c_str(), mess.length());
+            error(code);
+        }
 
     } while (strcasestr(response, "RCPT TO") != NULL);
 
@@ -1001,6 +1023,64 @@ bool deliver_to_dovecot_lmtp(email& mail)
 
     send_cmd("QUIT\r\n");
     close(lmtp_fd);
+
+    return ok;
+}
+
+bool valid_email(string address, db_config& db)
+{
+    MYSQL* conn = mysql_init(NULL);
+
+    if (conn == NULL)
+    {
+        perror("Error trying to establish mysql connection\n");
+        return false;
+    }
+
+    const char* env_user = getenv("DB_USER");
+    const char* env_pass = getenv("DB_PASS");
+    const char* env_table = getenv("DB_TABLE");
+
+    db.db_name = string(env_table);
+    db.user = string(env_user);
+    db.password = string(env_pass);
+
+    if (mysql_real_connect(conn,
+                           db.host.c_str(),
+                           db.user.c_str(),
+                           db.password.c_str(),
+                           db.db_name.c_str(),
+                           db.port, NULL, 0) == NULL)
+    {
+        cerr << "Error trying to connect to the database: " << mysql_error(conn) << '\n';
+        mysql_close(conn);
+        return false;
+    }
+
+    char escaped_email[256] = {0};
+    mysql_real_escape_string(conn, escaped_email, address.c_str(), address.length());
+
+    string query = "SELECT 1 FROM " + db.db_name + " WHERE Username = '" + string(escaped_email) + "' LIMIT 1;";
+
+    if (mysql_query(conn, query.c_str()) != 0)
+    {
+        cerr << "Error MYSQL query: " << mysql_error(conn) << '\n';
+        mysql_close(conn);
+
+        return false;
+    }
+
+    MYSQL_RES* result = mysql_store_result(conn);
+    bool ok = false;
+
+    if (result)
+    {
+        if (mysql_num_rows(result) == 1)
+            ok = true;
+        mysql_free_result(result);
+    }
+
+    mysql_close(conn);
 
     return ok;
 }
