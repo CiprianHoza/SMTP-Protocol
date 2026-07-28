@@ -463,7 +463,7 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
         if (!valid_email(address, db))
         {
             mess.clear();
-            mess = "550 5.1.1 <" + address + ">: User unknown\r\n";
+            mess = "550 5.1.1 <" + address + "> User unknown\r\n";
             code = SSL_write(ssl, mess.c_str(), mess.length());
             error(code);
         }
@@ -481,6 +481,12 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
 
     if (strncasecmp(response, "QUIT", 4) == 0)
     {
+        mess.clear();
+        mess = "221 2.0.0 Bye\r\n";
+
+        code = SSL_write(ssl, mess.c_str(), mess.length());
+        error(code);
+
         SSL_free(ssl);
         close(sockfd);
         
@@ -589,6 +595,12 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
 
     memset(response, 0, sizeof(response));
     code = SSL_read(ssl, response, sizeof(response) - 1);
+    error(code);
+
+    mess.clear();
+    mess = "221 2.0.0 Bye\r\n";
+
+    code = SSL_write(ssl, mess.c_str(), mess.length());
     error(code);
 
     SSL_free(ssl);

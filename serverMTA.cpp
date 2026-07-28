@@ -70,12 +70,19 @@ int main(void)
     }
 
     SSL_CTX* ctx = init_server_ssl_context();
+    char ip_str[INET_ADDRSTRLEN];
     while(true)
     {
         struct sockaddr_in client;
         socklen_t client_len = sizeof(client);
 
         int client_fd = accept(sockfd, (struct sockaddr*)&client, &client_len);
+
+        memset(ip_str, 0, sizeof(ip_str));
+
+        inet_ntop(AF_INET, &client.sin_addr.s_addr, ip_str, INET_ADDRSTRLEN);
+
+        cout<<"[SERVER] Connection received from " << string(ip_str) << '\n';
 
         if (client_fd < 0)
         {
@@ -104,6 +111,8 @@ int main(void)
 
         if (!deliver_to_dovecot_lmtp(mail))
             perror("Error trying to deliver the mail to Dovecot\n");
+        else
+            cout<<"[SERVER] Mail stored in database"<<'\n';
 
     }
 
