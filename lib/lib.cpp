@@ -426,7 +426,7 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
         code = SSL_read(ssl, response, sizeof(response) - 1);
         error(code);
         
-        if (strncasecmp(response, "DATA", 4) == 0)
+        if (strncasecmp(response, "DATA", 4) == 0 || strncasecmp(response, "QUIT", 4) == 0)
             break;
         
         address = extract_address(string(response));
@@ -478,6 +478,14 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
         }
 
     } while (strcasestr(response, "RCPT TO") != NULL);
+
+    if (strncasecmp(response, "QUIT", 4) == 0)
+    {
+        SSL_free(ssl);
+        close(sockfd);
+        
+        return email();
+    }
 
     cout<<"[SERVER] Recipients received!\n";
 

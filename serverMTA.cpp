@@ -102,6 +102,9 @@ int main(void)
 
         cout<<mail.corp.body<<'\n'<<'\n';
 
+        if (!deliver_to_dovecot_lmtp(mail))
+            perror("Error trying to deliver the mail to Dovecot\n");
+
     }
 
     close(sockfd);
