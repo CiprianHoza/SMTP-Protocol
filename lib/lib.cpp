@@ -4,6 +4,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <ranges>
 #include <string_view>
 #include <arpa/nameser.h>
@@ -480,6 +481,8 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
 
     raw_email.erase(raw_email.length() - 5);
 
+    mail.corp.raw_mail = raw_email;
+
     cout<<"[SERVER] Raw email received!\n";
 
     //EMAIL PARSING
@@ -925,4 +928,79 @@ string get_date()
     strftime(time, sizeof(time), "%a, %d %b %Y %H:%M:%S %z", now_tm);
 
     return string(time);
+}
+
+string read_lmtp_response(int lmtp_fd)
+{
+    char buffer[1024] = {0};
+    int bytes_read = recv(lmtp_fd, buffer, sizeof(buffer) - 1, 0);
+
+    if (bytes_read > 0)
+        return string(buffer, bytes_read);
+    return "";
+}
+
+bool deliver_to_dovecot_lmtp(email& mail)
+{
+    int lmtp_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (lmtp_fd < 0)
+        return false;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/var/run/dovecot/lmtp", sizeof(addr.sun_path) - 1);
+
+    if (connect(lmtp_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+    {
+        perror("Error trying to connect to the Dovecot socket\n");
+        close(lmtp_fd);
+        return false;
+    }
+
+    read_lmtp_response(lmtp_fd);
+
+    auto send_cmd = [lmtp_fd](const string& cmd) 
+    {
+        send(lmtp_fd, cmd.c_str(), cmd.length(), 0);
+        return read_lmtp_response(lmtp_fd);
+    };
+
+    send_cmd("LHLO localhost\r\n");
+    send_cmd("MAIL FROM:<" + mail.anvelopa.sender + ">\r\n");
+
+    size_t rcpt_count = mail.anvelopa.recipients.size();
+
+    for (const auto& rcpt : mail.anvelopa.recipients)
+        send_cmd("RCPT TO:<" + rcpt + ">\r\n");
+    
+    string data_resp = send_cmd("DATA\r\n");
+    if (data_resp.substr(0, 3) != "354")
+    {
+        close(lmtp_fd);
+        return false;
+    }
+
+    string payload = mail.corp.raw_mail;
+
+    if (payload.length() < 2 || payload.substr(payload.length() - 2) != "\r\n")
+        payload += "\r\n";
+    
+    payload += ".\r\n";
+
+    send(lmtp_fd, payload.c_str(), payload.length(), 0);
+
+    bool ok = true;
+    for (size_t i = 0; i < rcpt_count; i++)
+    {
+        string resp = read_lmtp_response(lmtp_fd);
+
+        if (resp.substr(0, 3) != "250")
+            ok = false;
+    }
+
+    send_cmd("QUIT\r\n");
+    close(lmtp_fd);
+
+    return ok;
 }

@@ -15,6 +15,7 @@ typedef struct
 {
     map<string, string> headers;
     string body;
+    string raw_mail;
 }emailData;
 
 typedef struct
