@@ -820,7 +820,6 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
         }
     }
 
-    raw_email.erase(raw_email.length() - 5);
 
     mail.corp.raw_mail = raw_email;
 
