@@ -16,6 +16,7 @@
 #include <ctime>
 #include <stdexcept>
 #include <mysql/mysql.h>
+#include <crypt.h>
 
 
 #include "include/packet.h"
@@ -51,7 +52,9 @@ string extract_address(string response);
 vector<string> get_mx_servers(const string& domain);
 MAILaddress split_address(const char* auxx);
 bool valid_email(string address, db_config& db);
-email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain);
+email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth);
+string base64_decode(string input);
+string clear_clr(string resp);
 
 
 void error(int code)
@@ -275,6 +278,276 @@ SPFvalidation is_ehlo_good(char response[])
     return res;
 }
 
+email receive_from_ua(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_domain)
+{
+    int code;
+    char response[1024];
+    email mail;
+
+    SSL* ssl = nullptr;
+
+    string mess = "220 " + smtp_domain + " ESMTP Server Ready\r\n";
+
+    try
+    {
+    code = send(sockfd, mess.c_str(), mess.length(), 0);
+    error(code);
+    
+    memset(response, 0, sizeof(response));
+    code = recv(sockfd, response, sizeof(response) - 1, 0);
+    error(code);
+
+    SPFvalidation val;
+
+    val = is_ehlo_good(response);
+
+    if (!val.is_valid)
+    {
+        code = send(sockfd, val.error_response.c_str(), val.error_response.length(), 0);
+        error(code);
+
+        close(sockfd);
+
+        return email();
+    }
+
+    mess.clear();
+    mess = "250 STARTTLS\r\n250 AUTH LOGIN PLAIN\r\n";
+    code = send(sockfd, mess.c_str(), mess.length(), 0);
+    error(code);
+
+    memset(response, 0, sizeof(response));
+    code = recv(sockfd, response, sizeof(response) - 1, 0);
+    error(code);
+
+    if (strncasecmp(response, "STARTTLS", 8) != 0)
+    {
+        mess.clear();
+        mess = "450 TLS Encryption required\r\n";
+        code = send(sockfd, mess.c_str(), mess.length(), NULL);
+
+        error(code);
+        close(sockfd);
+        return email();
+    }
+
+    mess.clear();
+    mess = "220 2.0.0 Ready to start TLS\r\n";
+    code = send(sockfd, mess.c_str(), mess.length(), 0);
+    error(code);
+
+    ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, sockfd);
+
+    code = SSL_accept(ssl);
+
+    if (code <= 0)
+    {
+        ERR_print_errors_fp(stderr);
+        SSL_free(ssl);
+        close(sockfd);
+
+        return email();
+    }
+
+    memset(response, 0, sizeof(response));
+    code = SSL_read(ssl, response, sizeof(response) - 1);
+    error(code);
+
+    val = is_ehlo_good(response);
+    if (!val.is_valid)
+    {
+        code = SSL_write(ssl, val.error_response.c_str(), val.error_response.length());
+        error(code);
+
+        SSL_free(ssl);
+        close(sockfd);
+        return email();
+    }
+
+    mess.clear();
+    mess = "250 AUTH LOGIN PLAIN\r\n";
+    code = SSL_write(ssl, mess.c_str(), mess.length());
+    error(code);
+
+    memset(response, 0, sizeof(response));
+    code = SSL_read(ssl, response, sizeof(response) - 1);
+    error(code);
+
+    mess.clear();
+    mess = "334 VXNlcm5hbWU6\r\n";
+    code = SSL_write(ssl, mess.c_str(), mess.length());
+    error(code);
+
+    memset(response, 0, sizeof(response));
+    code = SSL_read(ssl, response, sizeof(response) - 1);
+    error(code);
+
+    string clean_user = clear_clr(string(response));
+    string username = base64_decode(clean_user);
+
+    mess.clear();
+    mess = "334 UGFzc3dvcmQ6\r\n";
+    code = SSL_write(ssl, mess.c_str(), mess.length());
+    error(code);
+
+    memset(response, 0, sizeof(response));
+    code = SSL_read(ssl, response, sizeof(response) - 1);
+    error(code);
+
+    string clean_pass = clear_clr(string(response));
+    string password = base64_decode(clean_pass);
+
+    MYSQL* conn = mysql_init(NULL);
+
+    if (conn == NULL)
+    {
+        perror("Error trying to establish mysql connection\n");
+        mess.clear();
+        mess = "550 Error trying to acces the database. Try again later\r\n";
+        code = SSL_write(ssl, mess.c_str(), mess.length());
+        error(code);
+
+        SSL_free(ssl);
+        close(sockfd);
+        return email();
+    }
+
+    db_config db;
+
+    const char* env_user = getenv("DB_USER");
+    const char* env_pass = getenv("DB_PASS");
+    const char* env_table = getenv("DB_TABLE");
+
+    db.db_name = string(env_table);
+    db.user = string(env_user);
+    db.password = string(env_pass);
+
+    if (mysql_real_connect(conn,
+                           db.host.c_str(),
+                           db.user.c_str(),
+                           db.password.c_str(),
+                           db.db_name.c_str(),
+                           db.port, NULL, 0) == NULL)
+    {
+        cerr << "Error trying to connect to the database: " << mysql_error(conn) << '\n';
+        mess.clear();
+        mess = "550 Error trying to acces the database. Try again later\r\n";
+        code = SSL_write(ssl, mess.c_str(), mess.length());
+        error(code);
+
+        SSL_free(ssl);
+        close(sockfd);
+        mysql_close(conn);
+        return email();
+    }
+
+    char escaped_email[256] = {0};
+    mysql_real_escape_string(conn, escaped_email, username.c_str(), username.length());
+
+    string query = "SELECT Password FROM " + db.db_name + " WHERE Username = '" + string(escaped_email) + "' LIMIT 1;";
+
+    if (mysql_query(conn, query.c_str()) != 0)
+    {
+        cerr << "Error MYSQL query: " << mysql_error(conn) << '\n';
+        
+        mess.clear();
+        mess = "550 Error trying to acces the database. Try again later\r\n";
+        code = SSL_write(ssl, mess.c_str(), mess.length());
+        error(code);
+
+        SSL_free(ssl);
+        close(sockfd);
+        mysql_close(conn);
+        return email();
+    }
+
+    MYSQL_RES* result = mysql_store_result(conn);
+    if (result == NULL)
+    {
+        mess.clear();
+        mess = "550 Error trying to acces the database. Try again later\r\n";
+        code = SSL_write(ssl, mess.c_str(), mess.length());
+        error(code);
+
+        SSL_free(ssl);
+        close(sockfd);
+        mysql_close(conn);
+        return email();
+    }
+
+    string password_db = "";
+    MYSQL_ROW row = mysql_fetch_row(result);
+
+    if (row && row[0])
+        password_db = row[0];
+    
+    mysql_free_result(result);
+    mysql_close(conn);
+
+    struct crypt_data data;
+    data.initialized = 0;
+
+    if (password_db.empty())
+    {
+        mess.clear();
+        mess = "535 5.7.8 Authentication failed\r\n";
+        code = SSL_write(ssl, mess.c_str(), mess.length());
+        error(code);
+
+        SSL_free(ssl);
+        close(sockfd);
+        return email();
+    }
+
+    char* gen_hash = crypt_r(password.c_str(), password_db.c_str(), &data);
+
+    if (gen_hash == nullptr)
+    {
+        perror("Error trying to verify the hashes\n");
+        mess.clear();
+        mess = "550 Error trying to verify the hashes. Try again later\r\n";
+        code = SSL_write(ssl, mess.c_str(), mess.length());
+        error(code);
+
+        SSL_free(ssl);
+        close(sockfd);
+        return email();
+    }
+
+    if (password_db != string(gen_hash))
+    {
+        perror("Error: Passwords do not match\n");
+
+        mess.clear();
+        mess = "535 5.7.8 Authentication failed\r\n";
+        code = SSL_write(ssl, mess.c_str(), mess.length());
+        error(code);
+
+        SSL_free(ssl);
+        close(sockfd);
+        return email();
+    }
+
+    mess.clear();
+    mess = "235 2.7.0 Authentication successful\r\n";
+    code = SSL_write(ssl, mess.c_str(), mess.length());
+    error(code);  
+    }
+    catch(const std::exception& e)
+    {
+        cerr<<"[MTA Server error] "<<e.what()<<'\n';
+
+        if (ssl)
+            SSL_free(ssl);
+        close(sockfd);
+
+        return email();
+    }
+    
+    return recv_email_wthehl(sockfd, ssl, mail_domain, true);
+}
+
 email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_domain)
 {
     int code;
@@ -380,10 +653,10 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
         return email();
     }
 
-    return recv_email_wthehl(sockfd, ssl, mail_domain);
+    return recv_email_wthehl(sockfd, ssl, mail_domain, false);
 }
 
-email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain)
+email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
 {
     char response[1024];
     int code;
@@ -472,7 +745,7 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain)
         adresa.username.clear();
         adresa = split_address(address.c_str());
 
-        if (adresa.domain != mail_domain)
+        if (adresa.domain != mail_domain && !is_auth)
         {
             mess.clear();
             mess = "550 This server does not operate with the given domain\r\n";
@@ -484,22 +757,22 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain)
             return email();
         }
 
-        if (!valid_email(address, db))
+        if (adresa.domain == mail_domain && !valid_email(address, db))
         {
             mess.clear();
             mess = "550 5.1.1 <" + address + "> User unknown\r\n";
             code = SSL_write(ssl, mess.c_str(), mess.length());
             error(code);
-        }
-        else 
-        {
-            mail.anvelopa.recipients.push_back(string(address));
 
-            mess.clear();
-            mess = "250 2.1.5 Recipient OK\r\n";
-            code = SSL_write(ssl, mess.c_str(), mess.length());
-            error(code);
+            continue;
         }
+
+        mail.anvelopa.recipients.push_back(string(address));
+
+        mess.clear();
+        mess = "250 2.1.5 Recipient OK\r\n";
+        code = SSL_write(ssl, mess.c_str(), mess.length());
+        error(code);
 
     } while (strcasestr(response, "RCPT TO") != NULL);
 
@@ -527,6 +800,7 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain)
     string raw_email = "";
     char chunk[4096];
 
+    size_t dot_pos;
     while(true)
     {
         memset(chunk, 0, sizeof(chunk));
@@ -535,8 +809,12 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain)
 
         raw_email.append(chunk, code);
 
-        if (raw_email.length() >= 5 && raw_email.compare(raw_email.length() - 5, 5, "\r\n.\r\n") == 0)
+        dot_pos = raw_email.find("\r\n.\r\n");
+        if (dot_pos != string::npos)
+        {
+            raw_email.erase(dot_pos);
             break;
+        }
     }
 
     raw_email.erase(raw_email.length() - 5);
@@ -1127,4 +1405,31 @@ bool valid_email(string address, db_config& db)
     mysql_close(conn);
 
     return ok;
+}
+
+string base64_decode(string input)
+{
+    BIO *bio, *b64;
+    int decodeLen = input.length();
+
+    vector<char> buffer(decodeLen);
+
+    bio = BIO_new_mem_buf(input.data(), input.length());
+    b64 = BIO_new(BIO_f_base64());
+    bio = BIO_push(b64, bio);
+
+    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+
+    int len = BIO_read(bio, buffer.data(), input.length());
+    BIO_free_all(bio);
+
+    return (len > 0) ? string(buffer.data(), len) : "";
+}
+
+string clear_clr(string resp)
+{
+    size_t last = resp.find_last_not_of(" \r\n");
+    if (last != string::npos)
+        return resp.substr(0, last + 1);
+    return resp;
 }
