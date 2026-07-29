@@ -51,6 +51,7 @@ string extract_address(string response);
 vector<string> get_mx_servers(const string& domain);
 MAILaddress split_address(const char* auxx);
 bool valid_email(string address, db_config& db);
+email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain);
 
 
 void error(int code)
@@ -367,8 +368,31 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
     error(code);
 
     cout<<"[SERVER] TLS established!\n";
+    }
+    catch(const std::exception& e)
+    {
+        cerr<<"[MTA Server error] "<<e.what()<<'\n';
 
-    //MAIL FROM
+        if (ssl)
+            SSL_free(ssl);
+        close(sockfd);
+
+        return email();
+    }
+
+    return recv_email_wthehl(sockfd, ssl, mail_domain);
+}
+
+email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain)
+{
+    char response[1024];
+    int code;
+
+    email mail;
+    string mess;
+
+    try
+    {
     memset(response, 0, sizeof(response));
     code = SSL_read(ssl, response, sizeof(response) - 1);
     error(code);
@@ -388,6 +412,7 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
         return email();
     }
 
+    SPFvalidation val;
     val = address_validity(address.c_str(), sockfd);
 
     if (!val.is_valid)
@@ -416,7 +441,6 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
     code = SSL_write(ssl, mess.c_str(), mess.length());
     error(code);
 
-    //RCPT TO WILL NOT HAVE A DATABASE JUST NOW (ONLY TESTING THE RECEIVING MECHANISM)
     MAILaddress adresa;
     db_config db;
 
