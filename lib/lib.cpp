@@ -312,7 +312,7 @@ email receive_from_ua(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_
     }
 
     mess.clear();
-    mess = "250 STARTTLS\r\n250 AUTH LOGIN PLAIN\r\n";
+    mess = "250-" + smtp_domain + " Hello\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n";
     code = send(sockfd, mess.c_str(), mess.length(), 0);
     error(code);
 
@@ -366,7 +366,7 @@ email receive_from_ua(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_
     }
 
     mess.clear();
-    mess = "250 AUTH LOGIN PLAIN\r\n";
+    mess = "250-Hello\r\n250 AUTH LOGIN\r\n";
     code = SSL_write(ssl, mess.c_str(), mess.length());
     error(code);
 
@@ -686,7 +686,10 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
     }
 
     SPFvalidation val;
-    val = address_validity(address.c_str(), sockfd);
+    if (is_auth)
+        val.is_valid = true;
+    else
+        val = address_validity(address.c_str(), sockfd);
 
     if (!val.is_valid)
     {
