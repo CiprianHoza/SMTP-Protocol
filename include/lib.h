@@ -33,4 +33,7 @@ extern SSL_CTX* init_server_ssl_context();
 //deliver mail to Dovecot to store on database
 extern bool deliver_to_dovecot_lmtp(email& mail);
 
+//receive email from user agent
+extern email receive_from_ua(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_domain);
+
 #endif
