@@ -20,6 +20,7 @@
 
 
 #include "include/packet.h"
+#include "include/lib.h"
 
 extern "C" {
     #include <spf2/spf.h>
@@ -55,13 +56,14 @@ bool valid_email(string address, db_config& db);
 email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth);
 string base64_decode(string input);
 string clear_clr(string resp);
+void print_err_ssl();
 
 
 void error(int code)
 {
     if (code <= 0)
     {
-        perror("Error send/receive fail!\n");
+        sprint("Error send/receive fail!", '\n');
         throw std::runtime_error("Network I/O failure");
     }
 }
@@ -71,12 +73,13 @@ void check_error(char* response)
     if (!response || strlen(response) < 3)
         throw std::runtime_error("Invalid response");
 
-    char *p = strtok(response, " ");
+    char* saveptr;
+    char *p = strtok_r(response, " ", &saveptr);
 
     if (strncmp(p, "250", 3) != 0 && strncmp(p, "354", 3) != 0 && strncmp(p, "220", 3) != 0)
     {
         string error = string(p) + " bad response!\n";
-        cerr << error;
+        sprint(error);
         throw std::runtime_error("SMTP error");
     }
 }
@@ -92,31 +95,31 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     try
     {
         memset(response, 0, sizeof(response));
-    code = recv(sockfd, response, sizeof(response), NULL);
+    code = recv(sockfd, response, sizeof(response), 0);
     error(code);
 
     check_error(response);
 
     //Init connection
     string init = "EHLO " + smtp_domain + "\r\n";
-    send(sockfd, init.c_str(), init.length(), NULL);
+    send(sockfd, init.c_str(), init.length(), 0);
     error(code);
-    cout << "[SERVER] Sent EHLO\n";
+    sprint("[CLIENT ", this_thread::get_id(), "] Sent EHLO", '\n');
 
     memset(response, 0, sizeof(response));
-    code = recv(sockfd, response, sizeof(response), NULL);
+    code = recv(sockfd, response, sizeof(response), 0);
     error(code);
 
     check_error(response);
 
-    cout << "[SERVER] Starting TLS...\n";
+    sprint("[CLIENT ", this_thread::get_id(), "] Starting TLS...", '\n');
 
     //Starting TLS
-    code = send(sockfd, "STARTTLS\r\n", 10, NULL);
+    code = send(sockfd, "STARTTLS\r\n", 10, 0);
     error(code);
 
     memset(response, 0, sizeof(response));
-    code = recv(sockfd, response, sizeof(response), NULL);
+    code = recv(sockfd, response, sizeof(response), 0);
     error(code);
 
     check_error(response);
@@ -129,11 +132,11 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     
     if (SSL_connect(ssl) <= 0)
     {
-        perror("TLS handshake has failed!\n");
+        sprint("[CLIENT ", this_thread::get_id(), "] TLS handshake has failed!", '\n');
         return;
     }
 
-    cout << "[SERVER] SSL configured\n";
+    sprint("[CLIENT ", this_thread::get_id(), "] SSL configured", '\n');
 
     code = SSL_write(ssl, init.c_str(), init.length());
     error(code);
@@ -173,7 +176,7 @@ void send_mail(int sockfd, email mail, string smtp_domain)
         check_error(response);
     }
 
-    cout << "[SERVER] Sent recipients and sender\n";
+    sprint("[CLIENT ", this_thread::get_id(), "] Sent recipients and sender", '\n');
 
     //Sending DATA command
     code = SSL_write(ssl, "DATA\r\n", 6);
@@ -196,22 +199,20 @@ void send_mail(int sockfd, email mail, string smtp_domain)
         error(code);
     }
 
-    cout << "[SERVER] Sent headers\n";
+    sprint("[CLIENT ", this_thread::get_id(), "] Sent headers", '\n');
 
     //Sending body
     code = SSL_write(ssl, "\r\n", 2);
     error(code);
 
-    char message[1024];
-    sprintf(message, "%s\r\n", mail.corp.body.c_str());
-
-    code = SSL_write(ssl, message, strlen(message));
+    string full_body = mail.corp.body + "\r\n";
+    code = SSL_write(ssl, full_body.c_str(), full_body.length());
     error(code);
 
     code = SSL_write(ssl, ".\r\n", 3);
     error(code);
 
-    cout << "[SERVER] Sent body\n";
+    sprint("[CLIENT ", this_thread::get_id(), "] Sent body", '\n');
 
     memset(response, 0, sizeof(response));
     code = SSL_read(ssl, response, sizeof(response));
@@ -227,11 +228,11 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     SSL_CTX_free(ctx);
     close(sockfd);
 
-    cout << "[SERVER] Closed socket connection\n";
+    sprint("[CLIENT ", this_thread::get_id(), "] Closed socket connection", '\n');
     }
     catch(const std::exception& e)
     {
-        cerr<<"[MTA Client error] "<<e.what()<<'\n';
+        sprint("[MTA Client error ", this_thread::get_id(), "] ", e.what(), '\n');
 
         if (ssl)
         {
@@ -244,7 +245,8 @@ void send_mail(int sockfd, email mail, string smtp_domain)
 
 SPFvalidation is_ehlo_good(char response[])
 {
-    char *p = strtok(response, " \r\n");
+    char *saveptr;
+    char *p = strtok_r(response, " \r\n", &saveptr);
 
     SPFvalidation res;
 
@@ -264,7 +266,7 @@ SPFvalidation is_ehlo_good(char response[])
         return res;
     }
 
-    p = strtok(NULL, " \r\n");
+    p = strtok_r(NULL, " \r\n", &saveptr);
     if (p == NULL)
     {
         res.is_valid = false;
@@ -324,7 +326,7 @@ email receive_from_ua(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_
     {
         mess.clear();
         mess = "450 TLS Encryption required\r\n";
-        code = send(sockfd, mess.c_str(), mess.length(), NULL);
+        code = send(sockfd, mess.c_str(), mess.length(), 0);
 
         error(code);
         close(sockfd);
@@ -343,7 +345,7 @@ email receive_from_ua(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_
 
     if (code <= 0)
     {
-        ERR_print_errors_fp(stderr);
+        print_err_ssl();
         SSL_free(ssl);
         close(sockfd);
 
@@ -402,7 +404,7 @@ email receive_from_ua(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_
 
     if (conn == NULL)
     {
-        perror("Error trying to establish mysql connection\n");
+        sprint("[CLIENT ", this_thread::get_id(), "] Error trying to establish mysql connection", '\n');
         mess.clear();
         mess = "550 Error trying to acces the database. Try again later\r\n";
         code = SSL_write(ssl, mess.c_str(), mess.length());
@@ -430,7 +432,7 @@ email receive_from_ua(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_
                            db.db_name.c_str(),
                            db.port, NULL, 0) == NULL)
     {
-        cerr << "Error trying to connect to the database: " << mysql_error(conn) << '\n';
+        sprint("[CLIENT ", this_thread::get_id(), "] Error trying to connect to the database: ", mysql_error(conn), '\n');
         mess.clear();
         mess = "550 Error trying to acces the database. Try again later\r\n";
         code = SSL_write(ssl, mess.c_str(), mess.length());
@@ -449,7 +451,7 @@ email receive_from_ua(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_
 
     if (mysql_query(conn, query.c_str()) != 0)
     {
-        cerr << "Error MYSQL query: " << mysql_error(conn) << '\n';
+        sprint("[CLIENT ", this_thread::get_id(), "] Error MYSQL qeury: ", mysql_error(conn), '\n');
         
         mess.clear();
         mess = "550 Error trying to acces the database. Try again later\r\n";
@@ -504,7 +506,7 @@ email receive_from_ua(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_
 
     if (gen_hash == nullptr)
     {
-        perror("Error trying to verify the hashes\n");
+        sprint("[CLIENT ", this_thread::get_id(), "] Error trying to verify the hashes", '\n');
         mess.clear();
         mess = "550 Error trying to verify the hashes. Try again later\r\n";
         code = SSL_write(ssl, mess.c_str(), mess.length());
@@ -517,7 +519,7 @@ email receive_from_ua(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_
 
     if (password_db != string(gen_hash))
     {
-        perror("Error: Passwords do not match\n");
+        sprint("[CLIENT ", this_thread::get_id(), "] Error: Passwords do not match", '\n');
 
         mess.clear();
         mess = "535 5.7.8 Authentication failed\r\n";
@@ -536,7 +538,7 @@ email receive_from_ua(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_
     }
     catch(const std::exception& e)
     {
-        cerr<<"[MTA Server error] "<<e.what()<<'\n';
+        sprint("[MTA Client error ", this_thread::get_id(), e.what(), '\n');
 
         if (ssl)
             SSL_free(ssl);
@@ -560,19 +562,19 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
 
     try
     {
-        code = send(sockfd, mess.c_str(), mess.length(), NULL);
+        code = send(sockfd, mess.c_str(), mess.length(), 0);
     error(code);
 
     memset(response, 0, sizeof(response));
-    code = recv(sockfd, response, sizeof(response) - 1, NULL);
+    code = recv(sockfd, response, sizeof(response) - 1, 0);
     error(code);
 
-    cout<<"[SERVER] Sent hello message\n";
+    sprint("[SERVER ", this_thread::get_id(), "] Sent hello message", '\n');
 
     SPFvalidation val = is_ehlo_good(response);
     if (!val.is_valid)
     {
-        code = send(sockfd, val.error_response.c_str(), val.error_response.length(), NULL);
+        code = send(sockfd, val.error_response.c_str(), val.error_response.length(), 0);
         error(code);
         close(sockfd);
         return email();
@@ -581,17 +583,17 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
     mess.clear();
     mess = "250-" + smtp_domain + " Hello\r\n250 STARTTLS\r\n";
     
-    code = send(sockfd, mess.c_str(), mess.length(), NULL);
+    code = send(sockfd, mess.c_str(), mess.length(), 0);
     error(code);
 
     memset(response, 0, sizeof(response));
-    code = recv(sockfd, response, sizeof(response) - 1, NULL);
+    code = recv(sockfd, response, sizeof(response) - 1, 0);
 
     if (strncasecmp(response, "STARTTLS\r\n", 8) != 0)
     {
         mess.clear();
         mess = "450 TLS Encryption required\r\n";
-        code = send(sockfd, mess.c_str(), mess.length(), NULL);
+        code = send(sockfd, mess.c_str(), mess.length(), 0);
 
         error(code);
         close(sockfd);
@@ -600,10 +602,10 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
 
     mess.clear();
     mess = "220 2.0.0 Ready to start TLS\r\n";
-    code = send(sockfd, mess.c_str(), mess.length(), NULL);
+    code = send(sockfd, mess.c_str(), mess.length(), 0);
     error(code);
 
-    cout<<"[SERVER] Starting TLS...\n";
+    sprint("[SERVER ", this_thread::get_id(), "] Starting TLS...", '\n');
 
     ssl = SSL_new(ctx);
     SSL_set_fd(ssl, sockfd);
@@ -612,7 +614,7 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
 
     if (code <= 0)
     {
-        ERR_print_errors_fp(stderr);
+        print_err_ssl();
         SSL_free(ssl);
         close(sockfd);
 
@@ -640,11 +642,11 @@ email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_do
     code = SSL_write(ssl, mess.c_str(), mess.length());
     error(code);
 
-    cout<<"[SERVER] TLS established!\n";
+    sprint("[SERVER ", this_thread::get_id(), "] TLS established", '\n');
     }
     catch(const std::exception& e)
     {
-        cerr<<"[MTA Server error] "<<e.what()<<'\n';
+        sprint("[MTA Server error ", this_thread::get_id(), "] ", e.what(), '\n');
 
         if (ssl)
             SSL_free(ssl);
@@ -674,7 +676,7 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
 
     if (address == "")
     {
-        perror("Error trying to parse the sender's address\n");
+        sprint("[SERVER ", this_thread::get_id(), "] Error trying to parse the sender's address", '\n');
         mess.clear();
         mess = "501 Unable to fetch the sender\r\n";
         code = SSL_write(ssl, mess.c_str(), mess.length());
@@ -700,7 +702,7 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
         return email();
     }
 
-    cout<<"[SERVER] Sender received!\n";
+    sprint("[SERVER ", this_thread::get_id(), "] Sender received!", '\n');
 
     if (val.observation != "")
     {
@@ -733,7 +735,7 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
 
         if (address == "")
         {
-            perror("Error trying to parse the recipient's address\n");
+            sprint("[SERVER ", this_thread::get_id(), "] Error trying to parse the recipient's address", '\n');
             mess.clear();
             mess = "501 Unable to fetch the recipient\r\n";
             code = SSL_write(ssl, mess.c_str(), mess.length());
@@ -793,7 +795,7 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
         return email();
     }
 
-    cout<<"[SERVER] Recipients received!\n";
+    sprint("[SERVER ", this_thread::get_id(), "] Recipients received!", '\n');
 
     mess.clear();
     mess = "354 Start mail input; end with <CR><LF>.<CR><LF>\r\n";
@@ -823,7 +825,7 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
 
     mail.corp.raw_mail = raw_email;
 
-    cout<<"[SERVER] Raw email received!\n";
+    sprint("[SERVER ", this_thread::get_id(), "] Raw email received!", '\n');
 
     //EMAIL PARSING
 
@@ -831,7 +833,7 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
 
     if (header_end == string::npos)
     {
-        perror("Email structure is wrong\n");
+        sprint("[SERVER ", this_thread::get_id(), "] Email structure is wrong", '\n');
 
         mess.clear();
         mess = "450 Email structure is wrong\r\n";
@@ -895,7 +897,7 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
     code = SSL_write(ssl, mess.c_str(), mess.length());
     error(code);
 
-    cout<<"[SERVER] Mail accepted!\n";
+    sprint("[SERVER ", this_thread::get_id(), "] Mail accepted!", '\n');
 
     memset(response, 0, sizeof(response));
     code = SSL_read(ssl, response, sizeof(response) - 1);
@@ -912,7 +914,7 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
     }
     catch(const std::exception& e)
     {
-        cerr<<"[MTA Server error] "<<e.what()<<'\n';
+        sprint("[MTA Server error ", this_thread::get_id(), "] ", e.what(), '\n');
 
         if (ssl)
             SSL_free(ssl);
@@ -994,13 +996,13 @@ SPFvalidation address_validity(const char* auxx, int sockfd)
     len = sizeof(addr);
     if (getpeername(sockfd, (struct sockaddr*)&addr, &len) < 0)
     {
-        perror("Could not get the IP address of the client!\n");
+        sprint("[ERROR ", this_thread::get_id(), "] Could not get the IP address of the client!", '\n');
         res.is_valid = false;
         res.error_response = "550 Error trying to verify the SPF authentication\r\n";
         goto cleanup;
     }
 
-    spf_server = SPF_server_new(SPF_DNS_CACHE, 0);
+    spf_server = SPF_server_new(SPF_DNS_RESOLV, 0);
     if (spf_server == nullptr) {
         res.is_valid = false;
         res.error_response = "550 Internal SPF server error\r\n";
@@ -1023,7 +1025,7 @@ SPFvalidation address_validity(const char* auxx, int sockfd)
 
     if (err != SPF_E_SUCCESS)
     {
-        perror("Error trying to verify the SPF authentication\n");
+        sprint("[ERROR ", this_thread::get_id(), "] Error trying to verify the SPF authentication", '\n');
         res.is_valid = false;
         res.error_response = "550 Error trying to verify the SPF authentication\r\n";
 
@@ -1106,18 +1108,19 @@ MAILaddress split_address(const char* auxx)
     if (strchr(address, '@') == NULL)
         goto cleanup;
 
-    aux = strtok(address, "@");
+    char *saveptr;
+    aux = strtok_r(address, "@", &saveptr);
     if (aux == NULL)
         goto cleanup;
 
     strcpy(user, aux);
-    aux = strtok(NULL, "@");
+    aux = strtok_r(NULL, "@", &saveptr);
     if (aux == NULL)
         goto cleanup;
 
     strcpy(domain, aux);
 
-    aux = strtok(NULL, "@");
+    aux = strtok_r(NULL, "@", &saveptr);
     if (aux != NULL)
         goto cleanup;
 
@@ -1138,29 +1141,41 @@ SSL_CTX* init_server_ssl_context()
 
     if (!ctx)
     {
-        perror("Couldn't create SSL context!");
+        sprint("[ERROR ", this_thread::get_id(), "] Couldn't create SSL context!", '\n');
         exit(EXIT_FAILURE);
     }
 
     if (SSL_CTX_use_certificate_chain_file(ctx, "/etc/letsencrypt/live/chmail.test-projects.dev/fullchain.pem") <= 0)
     {
-        ERR_print_errors_fp(stderr);
+        print_err_ssl();
         exit(EXIT_FAILURE);
     }
 
     if (SSL_CTX_use_PrivateKey_file(ctx, "/etc/letsencrypt/live/chmail.test-projects.dev/privkey.pem", SSL_FILETYPE_PEM) <= 0)
     {
-        ERR_print_errors_fp(stderr);
+        print_err_ssl();
         exit(EXIT_FAILURE);
     }
 
     if (!SSL_CTX_check_private_key(ctx))
     {
-        fprintf(stderr, "Private key doesn't match with the certificate!\n");
+        sprint("[ERROR ", this_thread::get_id(), "] Private ket doesn't match with the certificate!", '\n');
         exit(EXIT_FAILURE);
     }
 
     return ctx;
+}
+
+void print_err_ssl()
+{
+    unsigned long err_code = ERR_get_error();
+
+    if (err_code)
+    {
+        char err_buff[256];
+        ERR_error_string_n(err_code, err_buff, sizeof(err_buff));
+        sprint("[ERROR ", this_thread::get_id(), "] OpenSSL error: ", err_buff);
+    }
 }
 
 map<string, vector<string>> domains(vector<string> recipients)
@@ -1190,20 +1205,18 @@ vector<string> get_mx_servers(const string& domain)
 
     unsigned char response[1024];
 
-    res_init();
-
     int length = res_search(domain.c_str(), ns_c_in, ns_t_mx, response, sizeof(response));
 
     if (length < 0)
     {
-        perror("Could not find the MX servers for the given domain!");
+        sprint("[ERROR ", this_thread::get_id(), "] Could not find the MX servers for the given domain!", '\n');
         return mx_servers;
     }
 
     ns_msg handle;
     if (ns_initparse(response, length, &handle) < 0)
     {
-        perror("Error at initializing the DNS parser!");
+        sprint("[ERROR ", this_thread::get_id(), "] Error at initializing the DNS parser!", '\n');
         return mx_servers;
     }
 
@@ -1237,7 +1250,7 @@ vector<string> get_mx_servers(const string& domain)
     return mx_servers;
 }
 
-void load_env(const string& filename = ".env")
+void load_env(const string& filename)
 {
     ifstream file(filename);
 
@@ -1267,11 +1280,12 @@ void load_env(const string& filename = ".env")
 string get_date()
 {
     time_t now = time(nullptr);
-    tm* now_tm = localtime(&now);
+    tm now_tm;
+    localtime_r(&now, &now_tm);
 
     char time[64];
 
-    strftime(time, sizeof(time), "%a, %d %b %Y %H:%M:%S %z", now_tm);
+    strftime(time, sizeof(time), "%a, %d %b %Y %H:%M:%S %z", &now_tm);
 
     return string(time);
 }
@@ -1299,7 +1313,7 @@ bool deliver_to_dovecot_lmtp(email& mail)
 
     if (connect(lmtp_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
     {
-        perror("Error trying to connect to the Dovecot socket\n");
+        sprint("[ERROR ", this_thread::get_id(), "] Error trying to connect to the Dovecot socket", '\n');
         close(lmtp_fd);
         return false;
     }
@@ -1357,7 +1371,7 @@ bool valid_email(string address, db_config& db)
 
     if (conn == NULL)
     {
-        perror("Error trying to establish mysql connection\n");
+        sprint("[ERROR ", this_thread::get_id(), "] Error trying to establish mysql connection", '\n');
         return false;
     }
 
@@ -1376,7 +1390,7 @@ bool valid_email(string address, db_config& db)
                            db.db_name.c_str(),
                            db.port, NULL, 0) == NULL)
     {
-        cerr << "Error trying to connect to the database: " << mysql_error(conn) << '\n';
+        sprint("[ERROR ", this_thread::get_id(), "] Error trying to connect to the database: ", mysql_error(conn), '\n');
         mysql_close(conn);
         return false;
     }
@@ -1388,7 +1402,7 @@ bool valid_email(string address, db_config& db)
 
     if (mysql_query(conn, query.c_str()) != 0)
     {
-        cerr << "Error MYSQL query: " << mysql_error(conn) << '\n';
+        sprint("[ERROR ", this_thread::get_id(), "] Error MYSQL query: ", mysql_error(conn), '\n');
         mysql_close(conn);
 
         return false;

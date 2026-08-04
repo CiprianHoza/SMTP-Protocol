@@ -30,36 +30,52 @@ int next_step(email mail, string smtp_domain, string PORT)
 
         if (mx_servers.size() == 0)
         {
-            perror("Could not find a MX server!\n");
+            sprint("[CLIENT ", this_thread::get_id(), "] Could not find a MX server!", '\n');
             return -1;
         }
 
-        struct addrinfo hints, *result;
+        sockfd = -1;
+        bool connected = false;
+
         for (auto& server : mx_servers)
         {
+            struct addrinfo hints, *result = nullptr;
             memset(&hints, 0, sizeof(hints));
             hints.ai_family = AF_INET;
             hints.ai_socktype = SOCK_STREAM;
 
             int code = getaddrinfo(server.c_str(), PORT.c_str(), &hints, &result);
-            if (code != 0)
+            if (code != 0 || !result)
             {
-                result = NULL;
+                sprint("[CLIENT ", this_thread::get_id(), "] DNS lookup failed for MX: ", server, '\n');
                 continue;
             }
 
             sockfd = socket(AF_INET, SOCK_STREAM, result->ai_protocol);
 
+            if (sockfd < 0)
+            {
+                freeaddrinfo(result);
+                continue;
+            }
+
             if (connect(sockfd, result->ai_addr, result->ai_addrlen) < 0)
             {
-                perror("Cannot connect to the given SMTP destination!");
+                sprint("[CLIENT ", this_thread::get_id(), "] Cannot connect to MX: ", server, ", trying another one...", '\n');
+                close(sockfd);
                 freeaddrinfo(result);
-                return -1;
+                continue;
             }
-            cout << "[CLIENT] Socket connection established\n";
-
+            sprint("[CLIENT ", this_thread::get_id(), "] Socket connection established with MX: ", server, '\n');
+            connected = true;
             freeaddrinfo(result);
             break;
+        }
+
+        if (!connected)
+        {
+            sprint("[CLIENT ", this_thread::get_id(), "] Failed to connect to any MX server for domain: ", domain, '\n');
+            return -1;
         }
 
         email temp = mail;
@@ -69,14 +85,35 @@ int next_step(email mail, string smtp_domain, string PORT)
         for (auto& rec : usernames)
             temp.anvelopa.recipients.push_back(rec + "@" + domain);
 
-        SSL_library_init();
-        OpenSSL_add_all_algorithms();
-        SSL_load_error_strings();
-        cout << "[CLIENT] SSL library loaded. Sending mail...\n";
+        sprint("[CLIENT ", this_thread::get_id(), "] SSL library loaded. Sending mail...", '\n');
         send_mail(sockfd, temp, smtp_domain);
     }
 
         return 0;
+}
+
+void handle_conn(int client_fd, SSL_CTX* ctx, string smtp_domain, string mail_domain, string PORT, string client_ip)
+{
+    sprint("[CLIENT ", this_thread::get_id(), "] Connection received from ", client_ip, '\n');
+
+        email true_mail = receive_from_ua(client_fd, ctx, smtp_domain, mail_domain);
+
+        if (true_mail.anvelopa.sender.empty())
+        {
+            sprint("[CLIENT ", this_thread::get_id(), "] Error on receiving the mail from user agent", '\n');
+            return;
+        }
+
+        true_mail.corp.headers["Message-ID"] = "<" + to_string(time(nullptr)) + "@" + mail_domain + ">";
+        true_mail.corp.headers["Date"] = get_date();
+
+        if (next_step(true_mail, smtp_domain, PORT) == -1)
+        {
+            sprint("[CLIENT ", this_thread::get_id(), "] Error trying sending the email...", '\n');
+            return;
+        }
+
+        sprint("[CLIENT ", this_thread::get_id(), "] Email sent!", '\n');
 }
 
 int main(void)
@@ -97,17 +134,6 @@ int main(void)
     string smtp_sender = string(env_sender);
     string PORT = string(env_port);
     string mail_domain = string(env_mail_domain);
-
-    //TEST MAIL
-    mail.anvelopa.sender = smtp_sender;
-    mail.anvelopa.recipients.push_back("hoza.ciprian2005@gmail.com");
-    mail.anvelopa.recipients.push_back("1149j.test@inbox.testmail.app");
-    mail.corp.headers["Subject"] = "test email";
-    mail.corp.headers["From"] = "Ciprian Hoza <" + smtp_sender + ">";
-    mail.corp.headers["Message-ID"] = "<" + to_string(time(nullptr)) + "@test-projects.dev>";
-    mail.corp.headers["Date"] = get_date();
-    mail.corp.body = "Acesta este inca un email de test mai lung de data aceasta!";
-    //TEST MAIL
 
     serveraddr.sin_family = AF_INET;
     serveraddr.sin_port = htons(587);
@@ -136,7 +162,6 @@ int main(void)
     }
 
     SSL_CTX* ctx = init_server_ssl_context();
-    char ip_str[INET_ADDRSTRLEN];
     while(true)
     {
         struct sockaddr_in client;
@@ -150,37 +175,17 @@ int main(void)
             continue;
         }
 
-        memset(ip_str, 0, sizeof(ip_str));
-
+        char ip_str[INET_ADDRSTRLEN] = {0};
         inet_ntop(AF_INET, &(client.sin_addr), ip_str, INET_ADDRSTRLEN);
 
-        cout<<"[CLIENT] Connection received from " << string(ip_str) << '\n';
+        string client_ip(ip_str);
 
-        if (client_fd < 0)
-        {
-            perror("[CLIENT] Error on connect!\n");
-            continue;
-        }
+        thread t(handle_conn, client_fd, ctx, smtp_domain, mail_domain, PORT, client_ip);
 
-        email true_mail = receive_from_ua(client_fd, ctx, smtp_domain, mail_domain);
-
-        if (true_mail.anvelopa.sender.empty())
-        {
-            perror("[CLIENT] Error on receiving the mail from user agent\n");
-            continue;
-        }
-
-        true_mail.corp.headers["Message-ID"] = "<" + to_string(time(nullptr)) + "@" + mail_domain + ">";
-        true_mail.corp.headers["Date"] = get_date();
-
-        if (next_step(true_mail, smtp_domain, PORT) == -1)
-        {
-            perror("[CLIENT]Error trying sending the email...\n");
-            continue;
-        }
-
-        cout << "[CLIENT] Email sent!" << '\n';
+        t.detach();
     }
     
+    close(uafd);
+    SSL_CTX_free(ctx);
     return 0;
 }

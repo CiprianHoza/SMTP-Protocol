@@ -22,6 +22,34 @@ extern "C" {
     #include <spf2/spf.h>
 }
 
+void handle_conn(int client_fd, SSL_CTX* ctx, string smtp_domain, string mail_domain, string ip_str)
+{
+    sprint("[SERVER ", this_thread::get_id(), "] Connection received from ", ip_str, '\n');
+
+    email mail = receive_email(client_fd, ctx, smtp_domain, mail_domain);
+
+        if (mail.anvelopa.sender.empty())
+        {
+            sprint("[SERVER ", this_thread::get_id(), "] Error trying to receive the email!", '\n');
+            return;
+        }
+
+        sprint(mail.anvelopa.sender, '\n');
+        sprint(mail.anvelopa.recipients[0], '\n');
+
+        for (auto& [key, value] : mail.corp.headers)
+        {
+            sprint(key, ": ", value, '\n');
+        }
+
+        sprint(mail.corp.body, '\n', '\n');
+
+        if (!deliver_to_dovecot_lmtp(mail))
+            sprint("Error trying to deliver the mail to Dovecot", '\n');
+        else
+            sprint("[SERVER ", this_thread::get_id(), "] Mail stored in database", '\n');
+}
+
 int main(void)
 {
     int sockfd;
@@ -70,7 +98,6 @@ int main(void)
     }
 
     SSL_CTX* ctx = init_server_ssl_context();
-    char ip_str[INET_ADDRSTRLEN];
     while(true)
     {
         struct sockaddr_in client;
@@ -78,11 +105,9 @@ int main(void)
 
         int client_fd = accept(sockfd, (struct sockaddr*)&client, &client_len);
 
-        memset(ip_str, 0, sizeof(ip_str));
-
+        char ip_str[INET_ADDRSTRLEN] = {0};
         inet_ntop(AF_INET, &client.sin_addr.s_addr, ip_str, INET_ADDRSTRLEN);
-
-        cout<<"[SERVER] Connection received from " << string(ip_str) << '\n';
+        string client_ip(ip_str);
 
         if (client_fd < 0)
         {
@@ -90,32 +115,12 @@ int main(void)
             continue;
         }
 
-        email mail = receive_email(client_fd, ctx, smtp_domain, mail_domain);
+        thread t(handle_conn, client_fd, ctx, smtp_domain, mail_domain, client_ip);
 
-        //TEST
-        if (mail.anvelopa.sender.empty())
-        {
-            cout<<"nu a mers\n";
-            continue;
-        }
-
-        cout<<mail.anvelopa.sender<<'\n';
-        cout<<mail.anvelopa.recipients[0]<<'\n';
-
-        for (auto& [key, value] : mail.corp.headers)
-        {
-            cout<<key<<": "<<value<<'\n'; 
-        }
-
-        cout<<mail.corp.body<<'\n'<<'\n';
-
-        if (!deliver_to_dovecot_lmtp(mail))
-            perror("Error trying to deliver the mail to Dovecot\n");
-        else
-            cout<<"[SERVER] Mail stored in database"<<'\n';
-
+        t.detach();
     }
 
     close(sockfd);
+    SSL_CTX_free(ctx);
     return 0;
 }

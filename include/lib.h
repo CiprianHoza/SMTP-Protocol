@@ -2,6 +2,26 @@
 #define _LIB_H
 
 #include "packet.h"
+#include <thread>
+#include <mutex>
+#include <utility>
+
+//safe print method for multithreading
+class ThreadPrint
+{
+    private:
+        static inline mutex mtx;
+    
+    public:
+        template <typename... Args>
+        void operator()(Args&&... args) const 
+        {
+            lock_guard<mutex> lock(mtx);
+            (cout << ... << forward<Args>(args)) << '\n';
+        }
+};
+
+inline constexpr ThreadPrint sprint;
 
 //send email
 extern void send_mail(int sockfd, email mail, string smtp_domain);
