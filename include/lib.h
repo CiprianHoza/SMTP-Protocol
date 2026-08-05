@@ -61,6 +61,6 @@ extern bool deliver_to_dovecot_lmtp(email& mail);
 extern email receive_from_ua(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_domain);
 
 //get DKIM-Signature header
-extern string sign_dkim(const string& raw_email, const string& domain, const string& selector, const string& key_path);
+extern string sign_dkim(const email& email, const string& domain, const string& selector, const string& key_path);
 
 #endif

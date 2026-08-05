@@ -1453,7 +1453,7 @@ string clear_clr(string resp)
     return resp;
 }
 
-string sign_dkim(const string& raw_email, const string& domain, const string& selector, const string& key_path)
+string sign_dkim(const email& email, const string& domain, const string& selector, const string& key_path)
 {
     DKIM_STAT status;
 
@@ -1465,22 +1465,67 @@ string sign_dkim(const string& raw_email, const string& domain, const string& se
         (unsigned char*)selector.c_str(),
         (unsigned char*)domain.c_str(),
         DKIM_CANON_RELAXED,
-        DKIM_CANON_SIMPLE,
+        DKIM_CANON_RELAXED,
         DKIM_SIGN_RSASHA256,
         -1,
         &status
     );
 
     if (status != DKIM_STAT_OK || !dkim)
+    {
+        sprint("[CLIENT Error ", this_thread::get_id(), "] dkim_sign failed, status: ", status, '\n');
         return "";
+    }
     
-    dkim_chunk(dkim, (unsigned char*)raw_email.c_str(), raw_email.length());
-    dkim_chunk(dkim, NULL, 0);
+    for (const auto& pair : email.corp.headers)
+    {
+        string header_line = pair.first + ": " + pair.second + "\r\n";
+        status = dkim_header(dkim, (unsigned char*)header_line.c_str(), header_line.length());
+
+        if (status != DKIM_STAT_OK)
+        {
+            sprint("[CLIENT Error ", this_thread::get_id(), "] dkim_header failed on ", pair.first, " with status: ", status, '\n');
+            dkim_free(dkim);
+            return "";
+        }
+    }
+
+    status = dkim_eoh(dkim);
+    if (status != DKIM_STAT_OK) {
+        sprint("[CLIENT Error ", this_thread::get_id(), "] dkim_eoh failed with status: ", status, '\n');
+        dkim_free(dkim);
+        return "";
+    }
+
+    string body = email.corp.body;
+    if (body.empty() || (body.size() >= 2 && body.substr(body.size() - 2) != "\r\n")) {
+        body += "\r\n";
+    }
+
+    status = dkim_chunk(dkim, (unsigned char*)body.c_str(), body.length());
+    if (status != DKIM_STAT_OK) {
+        sprint("[CLIENT Error ", this_thread::get_id(), "] dkim_chunk body failed with status: ", status, '\n');
+        dkim_free(dkim);
+        return "";
+    }
+
+    status = dkim_chunk(dkim, NULL, 0);
+    if (status != DKIM_STAT_OK) {
+        sprint("[CLIENT Error ", this_thread::get_id(), "] dkim_chunk EOB failed with status: ", status, '\n');
+        dkim_free(dkim);
+        return "";
+    }
 
     u_char* sig_buf = nullptr;
     size_t sig_len = 0;
 
     status = dkim_getsighdr_d(dkim, 0, &sig_buf, &sig_len);
+
+    if (status != DKIM_STAT_OK) {
+        sprint("[CLIENT Error ", this_thread::get_id(), "dkim_getsighdr_d failed with status: ", status, '\n');
+        dkim_free(dkim);
+        return "";
+    }
 
     string dkim_header = "";
     if (status == DKIM_STAT_OK && sig_buf && sig_len > 0)

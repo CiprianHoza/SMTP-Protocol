@@ -27,15 +27,7 @@ int next_step(email mail, string smtp_domain, string PORT, string mail_domain)
     map<string, vector<string>> domenii = domains(mail.anvelopa.recipients);
 
     string key_path = "/etc/opendkim/keys/" + mail_domain + "/mail.private";
-    
-    string raw_for_dkim = "";
-    for (const auto& pair : mail.corp.headers)
-        raw_for_dkim += pair.first + ": " + pair.second + "\r\n";
-    
-    raw_for_dkim += "\r\n";
-    raw_for_dkim += mail.corp.body + "\r\n";
-
-    string dkim_header = sign_dkim(raw_for_dkim, mail_domain, "mail", key_path);
+    string dkim_header = sign_dkim(mail, mail_domain, "mail", key_path);
 
     if (!dkim_header.empty())
     {
