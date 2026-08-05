@@ -11,6 +11,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <ctime>
+#include <opendkim/dkim.h>
 
 #include "include/packet.h"
 #include "include/lib.h"
@@ -19,10 +20,42 @@ extern "C" {
     #include <spf2/spf.h>
 }
 
-int next_step(email mail, string smtp_domain, string PORT)
+
+int next_step(email mail, string smtp_domain, string PORT, string mail_domain)
 {
     int sockfd;
     map<string, vector<string>> domenii = domains(mail.anvelopa.recipients);
+
+    string key_path = "/etc/opendkim/keys/" + mail_domain + "/mail.private";
+    
+    string raw_for_dkim = "";
+    for (const auto& pair : mail.corp.headers)
+        raw_for_dkim += pair.first + ": " + pair.second + "\r\n";
+    
+    raw_for_dkim += "\r\n";
+    raw_for_dkim += mail.corp.body + "\r\n";
+
+    string dkim_header = sign_dkim(raw_for_dkim, mail_domain, "mail", key_path);
+
+    if (!dkim_header.empty())
+    {
+        sprint("[CLIENT ", this_thread::get_id(), "] DKIM signature created successfully!", '\n');
+
+        size_t pos = dkim_header.find(':');
+        if (pos != string::npos)
+        {
+            string value = dkim_header.substr(pos + 1);
+
+            while (!value.empty() && (value.back() == '\r' || value.back() == '\n' || value.back() == ' '))
+                value.pop_back();
+            while (!value.empty() && value.front() == ' ')
+                value.erase(0, 1);
+
+            mail.corp.headers["DKIM-Signature"] = value;
+        }
+    }
+    else
+        sprint("[CLIENT ", this_thread::get_id(), "] Failed to generate DKIM signature!", '\n');
 
     for (auto& [domain, usernames] : domenii)
     {
@@ -31,7 +64,7 @@ int next_step(email mail, string smtp_domain, string PORT)
         if (mx_servers.size() == 0)
         {
             sprint("[CLIENT ", this_thread::get_id(), "] Could not find a MX server!", '\n');
-            return -1;
+            continue;
         }
 
         sockfd = -1;
@@ -75,7 +108,7 @@ int next_step(email mail, string smtp_domain, string PORT)
         if (!connected)
         {
             sprint("[CLIENT ", this_thread::get_id(), "] Failed to connect to any MX server for domain: ", domain, '\n');
-            return -1;
+            continue;;
         }
 
         email temp = mail;
@@ -107,7 +140,7 @@ void handle_conn(int client_fd, SSL_CTX* ctx, string smtp_domain, string mail_do
         true_mail.corp.headers["Message-ID"] = "<" + to_string(time(nullptr)) + "@" + mail_domain + ">";
         true_mail.corp.headers["Date"] = get_date();
 
-        if (next_step(true_mail, smtp_domain, PORT) == -1)
+        if (next_step(true_mail, smtp_domain, PORT, mail_domain) == -1)
         {
             sprint("[CLIENT ", this_thread::get_id(), "] Error trying sending the email...", '\n');
             return;
@@ -122,6 +155,13 @@ int main(void)
     struct sockaddr_in serveraddr;
 
     email mail;
+
+    g_dkim_lib = dkim_init(NULL, NULL);
+    if (!g_dkim_lib)
+    {
+        cerr << "[CLIENT] Error at DKIM Initialising!" << '\n';
+        return 1;
+    }
 
     load_env();
 

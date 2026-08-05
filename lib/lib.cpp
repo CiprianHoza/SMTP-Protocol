@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <mysql/mysql.h>
 #include <crypt.h>
+#include <opendkim/dkim.h>
 
 
 #include "include/packet.h"
@@ -47,6 +48,8 @@ struct db_config
     string db_name = "";
     unsigned int port = 3306;
 };
+
+DKIM_LIB* g_dkim_lib = nullptr;
 
 SPFvalidation address_validity(const char* auxx, int sockfd);
 string extract_address(string response);
@@ -1448,4 +1451,47 @@ string clear_clr(string resp)
     if (last != string::npos)
         return resp.substr(0, last + 1);
     return resp;
+}
+
+string sign_dkim(const string& raw_email, const string& domain, const string& selector, const string& key_path)
+{
+    DKIM_STAT status;
+
+    DKIM* dkim = dkim_sign(
+        g_dkim_lib,
+        (unsigned char*)"id",
+        NULL,
+        (unsigned char*)key_path.c_str(),
+        (unsigned char*)selector.c_str(),
+        (unsigned char*)domain.c_str(),
+        DKIM_CANON_RELAXED,
+        DKIM_CANON_SIMPLE,
+        DKIM_SIGN_RSASHA256,
+        -1,
+        &status
+    );
+
+    if (status != DKIM_STAT_OK || !dkim)
+        return "";
+    
+    dkim_chunk(dkim, (unsigned char*)raw_email.c_str(), raw_email.length());
+    dkim_chunk(dkim, NULL, 0);
+
+    u_char* sig_buf = nullptr;
+    size_t sig_len = 0;
+
+    status = dkim_getsighdr_d(dkim, 0, &sig_buf, &sig_len);
+
+    string dkim_header = "";
+    if (status == DKIM_STAT_OK && sig_buf && sig_len > 0)
+    {
+        dkim_header = string((char*)sig_buf, sig_len);
+
+        if (dkim_header.size() < 2 || dkim_header.substr(dkim_header.size() - 2) != "\r\n") 
+            dkim_header += "\r\n";
+    }
+
+    dkim_free(dkim);
+
+    return dkim_header;
 }
