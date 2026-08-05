@@ -5,7 +5,6 @@
 #include <thread>
 #include <mutex>
 #include <utility>
-#include <opendkim/dkim.h>
 
 //safe print method for multithreading
 class ThreadPrint
@@ -23,9 +22,6 @@ class ThreadPrint
 };
 
 inline constexpr ThreadPrint sprint;
-
-//used for DKIM signing
-extern DKIM_LIB* g_dkim_lib;
 
 //send email
 extern void send_mail(int sockfd, email mail, string smtp_domain);

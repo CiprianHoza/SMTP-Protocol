@@ -12,12 +12,14 @@
 #include <netinet/in.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/rsa.h>
+#include <openssl/pem.h>
 #include <fstream>
 #include <ctime>
 #include <stdexcept>
 #include <mysql/mysql.h>
 #include <crypt.h>
-#include <opendkim/dkim.h>
 
 
 #include "include/packet.h"
@@ -49,8 +51,6 @@ struct db_config
     unsigned int port = 3306;
 };
 
-DKIM_LIB* g_dkim_lib = nullptr;
-
 SPFvalidation address_validity(const char* auxx, int sockfd);
 string extract_address(string response);
 vector<string> get_mx_servers(const string& domain);
@@ -58,8 +58,12 @@ MAILaddress split_address(const char* auxx);
 bool valid_email(string address, db_config& db);
 email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth);
 string base64_decode(string input);
+string base64_encode(const unsigned char* data, size_t len);
 string clear_clr(string resp);
 void print_err_ssl();
+string canonicalize_header_relaxed(const string& header_name, const string& header_value);
+string canonicalize_body_relaxed(const string& body);
+string sign_dkim_openssl(const email& mail, const string& domain, const string& selector, const string& key_path);
 
 
 void error(int code)
@@ -1445,6 +1449,215 @@ string base64_decode(string input)
     return (len > 0) ? string(buffer.data(), len) : "";
 }
 
+string base64_encode(const unsigned char* data, size_t len)
+{
+    BIO *bio, *b64;
+    BUF_MEM *buffer_ptr;
+
+    bio = BIO_new(BIO_s_mem());
+    b64 = BIO_new(BIO_f_base64());
+    bio = BIO_push(b64, bio);
+
+    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
+    BIO_write(bio, data, len);
+    BIO_flush(bio);
+    BIO_get_mem_ptr(bio, &buffer_ptr);
+
+    string result(buffer_ptr->data, buffer_ptr->length);
+    BIO_free_all(bio);
+
+    return result;
+}
+
+string canonicalize_header_relaxed(const string& header_name, const string& header_value)
+{
+    string name = header_name;
+    string value = header_value;
+
+    transform(name.begin(), name.end(), name.begin(), ::tolower);
+
+    size_t end = value.find_last_not_of(" \t\r\n");
+    if (end != string::npos)
+        value = value.substr(0, end + 1);
+
+    size_t start = value.find_first_not_of(" \t\r\n");
+    if (start != string::npos)
+        value = value.substr(start);
+    else
+        value = "";
+
+    string canonical_value;
+    bool in_space = false;
+    for (char c : value)
+    {
+        if (c == ' ' || c == '\t')
+        {
+            if (!in_space)
+            {
+                canonical_value += ' ';
+                in_space = true;
+            }
+        }
+        else
+        {
+            canonical_value += c;
+            in_space = false;
+        }
+    }
+
+    return name + ":" + canonical_value;
+}
+
+string canonicalize_body_relaxed(const string& body)
+{
+    string result = body;
+
+    while (!result.empty() && (result.back() == '\r' || result.back() == '\n'))
+        result.pop_back();
+
+    vector<string> lines;
+    stringstream ss(result);
+    string line;
+    while (getline(ss, line))
+    {
+        size_t end = line.find_last_not_of(" \t\r\n");
+        if (end != string::npos)
+            line = line.substr(0, end + 1);
+        else
+            line = "";
+
+        lines.push_back(line);
+    }
+
+    while (!lines.empty() && lines.back().empty())
+        lines.pop_back();
+
+    string canonical;
+    for (size_t i = 0; i < lines.size(); ++i)
+    {
+        canonical += lines[i];
+        if (i < lines.size() - 1)
+            canonical += "\r\n";
+    }
+    if (canonical.empty())
+        return "\r\n";
+
+    return canonical + "\r\n";
+}
+
+string sign_dkim_openssl(const email& mail, const string& domain, const string& selector, const string& key_path)
+{
+    try
+    {
+        FILE* key_file = fopen(key_path.c_str(), "r");
+        if (!key_file)
+        {
+            sprint("[ERROR ", this_thread::get_id(), "] Could not open DKIM key file: ", key_path, '\n');
+            return "";
+        }
+
+        EVP_PKEY* pkey = PEM_read_PrivateKey(key_file, nullptr, nullptr, nullptr);
+        fclose(key_file);
+
+        if (!pkey)
+        {
+            sprint("[ERROR ", this_thread::get_id(), "] Could not read DKIM private key", '\n');
+            return "";
+        }
+
+        string headers_to_sign;
+        vector<string> header_list;
+        for (const auto& pair : mail.corp.headers)
+        {
+            string canonical = canonicalize_header_relaxed(pair.first, pair.second);
+            headers_to_sign += canonical + "\r\n";
+            header_list.push_back(pair.first);
+        }
+
+        if (!headers_to_sign.empty() && headers_to_sign.length() >= 2)
+            headers_to_sign = headers_to_sign.substr(0, headers_to_sign.length() - 2);
+
+        string canonical_body = canonicalize_body_relaxed(mail.corp.body);
+
+        unsigned char header_hash[EVP_MAX_MD_SIZE];
+        unsigned int header_hash_len = 0;
+        EVP_MD_CTX* hash_ctx = EVP_MD_CTX_new();
+        EVP_DigestInit(hash_ctx, EVP_sha256());
+        EVP_DigestUpdate(hash_ctx, (unsigned char*)headers_to_sign.c_str(), headers_to_sign.length());
+        EVP_DigestFinal(hash_ctx, header_hash, &header_hash_len);
+
+        unsigned char body_hash[EVP_MAX_MD_SIZE];
+        unsigned int body_hash_len = 0;
+        EVP_DigestInit(hash_ctx, EVP_sha256());
+        EVP_DigestUpdate(hash_ctx, (unsigned char*)canonical_body.c_str(), canonical_body.length());
+        EVP_DigestFinal(hash_ctx, body_hash, &body_hash_len);
+        EVP_MD_CTX_free(hash_ctx);
+
+        string body_hash_b64 = base64_encode(body_hash, body_hash_len);
+
+        time_t now = time(nullptr);
+        string sig_header = "v=1; a=rsa-sha256; c=relaxed/relaxed; d=" + domain + "; s=" + selector +
+                           "; t=" + to_string(now) + "; bh=" + body_hash_b64 + "; h=";
+
+        for (size_t i = 0; i < header_list.size(); ++i)
+        {
+            string h = header_list[i];
+            transform(h.begin(), h.end(), h.begin(), ::tolower);
+            sig_header += h;
+            if (i < header_list.size() - 1)
+                sig_header += ":";
+        }
+
+        sig_header += "; b=";
+
+        string data_to_sign = headers_to_sign + "\r\n" + canonicalize_header_relaxed("DKIM-Signature", sig_header);
+
+        EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
+        if (!md_ctx)
+        {
+            sprint("[ERROR ", this_thread::get_id(), "] Could not create EVP context", '\n');
+            EVP_PKEY_free(pkey);
+            return "";
+        }
+
+        if (EVP_SignInit(md_ctx, EVP_sha256()) != 1)
+        {
+            sprint("[ERROR ", this_thread::get_id(), "] Could not initialize signing", '\n');
+            EVP_MD_CTX_free(md_ctx);
+            EVP_PKEY_free(pkey);
+            return "";
+        }
+
+        EVP_SignUpdate(md_ctx, (unsigned char*)data_to_sign.c_str(), data_to_sign.length());
+
+        unsigned char signature[512];
+        unsigned int sig_len = 0;
+
+        if (EVP_SignFinal(md_ctx, signature, &sig_len, pkey) != 1)
+        {
+            sprint("[ERROR ", this_thread::get_id(), "] Signing failed", '\n');
+            EVP_MD_CTX_free(md_ctx);
+            EVP_PKEY_free(pkey);
+            return "";
+        }
+
+        EVP_MD_CTX_free(md_ctx);
+        EVP_PKEY_free(pkey);
+
+        string sig_b64 = base64_encode(signature, sig_len);
+
+        string dkim_sig = "DKIM-Signature: " + sig_header + sig_b64;
+
+        sprint("[CLIENT ", this_thread::get_id(), "] DKIM signature generated successfully", '\n');
+        return dkim_sig;
+    }
+    catch (const exception& e)
+    {
+        sprint("[ERROR ", this_thread::get_id(), "] DKIM signing error: ", e.what(), '\n');
+        return "";
+    }
+}
+
 string clear_clr(string resp)
 {
     size_t last = resp.find_last_not_of(" \r\n");
@@ -1455,88 +1668,5 @@ string clear_clr(string resp)
 
 string sign_dkim(const email& email, const string& domain, const string& selector, const string& key_path)
 {
-    DKIM_STAT status;
-
-    DKIM* dkim = dkim_sign(
-        g_dkim_lib,
-        (unsigned char*)"id",
-        NULL,
-        (unsigned char*)key_path.c_str(),
-        (unsigned char*)selector.c_str(),
-        (unsigned char*)domain.c_str(),
-        DKIM_CANON_RELAXED,
-        DKIM_CANON_RELAXED,
-        DKIM_SIGN_RSASHA256,
-        -1,
-        &status
-    );
-
-    if (status != DKIM_STAT_OK || !dkim)
-    {
-        sprint("[CLIENT Error ", this_thread::get_id(), "] dkim_sign failed, status: ", status, '\n');
-        return "";
-    }
-    
-    for (const auto& pair : email.corp.headers)
-    {
-        string header_line = pair.first + ": " + pair.second + "\r\n";
-        status = dkim_header(dkim, (unsigned char*)header_line.c_str(), header_line.length());
-
-        if (status != DKIM_STAT_OK)
-        {
-            sprint("[CLIENT Error ", this_thread::get_id(), "] dkim_header failed on ", pair.first, " with status: ", status, '\n');
-            dkim_free(dkim);
-            return "";
-        }
-    }
-
-    status = dkim_eoh(dkim);
-    if (status != DKIM_STAT_OK) {
-        sprint("[CLIENT Error ", this_thread::get_id(), "] dkim_eoh failed with status: ", status, '\n');
-        dkim_free(dkim);
-        return "";
-    }
-
-    string body = email.corp.body;
-    if (body.empty() || (body.size() >= 2 && body.substr(body.size() - 2) != "\r\n")) {
-        body += "\r\n";
-    }
-
-    status = dkim_chunk(dkim, (unsigned char*)body.c_str(), body.length());
-    if (status != DKIM_STAT_OK) {
-        sprint("[CLIENT Error ", this_thread::get_id(), "] dkim_chunk body failed with status: ", status, '\n');
-        dkim_free(dkim);
-        return "";
-    }
-
-    status = dkim_chunk(dkim, NULL, 0);
-    if (status != DKIM_STAT_OK) {
-        sprint("[CLIENT Error ", this_thread::get_id(), "] dkim_chunk EOB failed with status: ", status, '\n');
-        dkim_free(dkim);
-        return "";
-    }
-
-    u_char* sig_buf = nullptr;
-    size_t sig_len = 0;
-
-    status = dkim_getsighdr_d(dkim, 0, &sig_buf, &sig_len);
-
-    if (status != DKIM_STAT_OK) {
-        sprint("[CLIENT Error ", this_thread::get_id(), "dkim_getsighdr_d failed with status: ", status, '\n');
-        dkim_free(dkim);
-        return "";
-    }
-
-    string dkim_header = "";
-    if (status == DKIM_STAT_OK && sig_buf && sig_len > 0)
-    {
-        dkim_header = string((char*)sig_buf, sig_len);
-
-        if (dkim_header.size() < 2 || dkim_header.substr(dkim_header.size() - 2) != "\r\n") 
-            dkim_header += "\r\n";
-    }
-
-    dkim_free(dkim);
-
-    return dkim_header;
+    return sign_dkim_openssl(email, domain, selector, key_path);
 }

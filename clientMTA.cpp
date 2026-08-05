@@ -11,7 +11,6 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <ctime>
-#include <opendkim/dkim.h>
 
 #include "include/packet.h"
 #include "include/lib.h"
@@ -147,13 +146,6 @@ int main(void)
     struct sockaddr_in serveraddr;
 
     email mail;
-
-    g_dkim_lib = dkim_init(NULL, NULL);
-    if (!g_dkim_lib)
-    {
-        cerr << "[CLIENT] Error at DKIM Initialising!" << '\n';
-        return 1;
-    }
 
     load_env();
 
