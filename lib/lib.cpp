@@ -1964,21 +1964,41 @@ bool verify_dkim(const email& mail)
         stringstream h_ss(tags["h"]);
         string header_name;
         string headers_to_verify = "";
+        map<string, int> header_usage;
+
+        auto find_header_value = [&](const string& name, int occurrence_count) -> pair<bool, string> {
+            int seen = 0;
+            for (int i = (int)parsed_headers.size() - 1; i >= 0; --i) {
+                if (strcasecmp(parsed_headers[i].key.c_str(), name.c_str()) == 0) {
+                    if (seen == occurrence_count) {
+                        return {true, parsed_headers[i].value};
+                    }
+                    ++seen;
+                }
+            }
+
+            int map_seen = 0;
+            for (const auto& [k, v] : mail.corp.headers) {
+                if (strcasecmp(k.c_str(), name.c_str()) == 0) {
+                    if (map_seen == occurrence_count) {
+                        return {true, v};
+                    }
+                    ++map_seen;
+                }
+            }
+
+            return {false, ""};
+        };
 
         while (getline(h_ss, header_name, ':')) {
             header_name.erase(0, header_name.find_first_not_of(" \t\r\n"));
             header_name.erase(header_name.find_last_not_of(" \t\r\n") + 1);
 
-            bool found = false;
-            for (auto it = parsed_headers.rbegin(); it != parsed_headers.rend(); ++it) {
-                if (!it->used_for_dkim && strcasecmp(it->key.c_str(), header_name.c_str()) == 0) {
-                    headers_to_verify += canonicalize_header_relaxed(it->key, it->value) + "\r\n";
-                    it->used_for_dkim = true;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
+            auto found_value = find_header_value(header_name, header_usage[header_name]);
+            if (found_value.first) {
+                headers_to_verify += canonicalize_header_relaxed(header_name, found_value.second) + "\r\n";
+                ++header_usage[header_name];
+            } else {
                 sprint("[SERVER DKIM ", this_thread::get_id(), "] Could not find header instance for h= list: ", header_name, '\n');
                 EVP_PKEY_free(p_key);
                 return false;
