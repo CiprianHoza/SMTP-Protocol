@@ -975,7 +975,10 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
         }
     }
     else
+    {
         mail.corp.headers["X-DMARC-Status"] = "PASS";
+        mail.corp.headers["X-Spam-Flag"] = "NO";
+    }
     }
 
     mess.clear();
@@ -1556,43 +1559,39 @@ string base64_encode(const unsigned char* data, size_t len)
     return result;
 }
 
-string canonicalize_header_relaxed(const string& header_name, const string& header_value)
+string canonicalize_header_relaxed(const string& key, const string& val) 
 {
-    string name = header_name;
-    string value = header_value;
+    string k = key;
+    transform(k.begin(), k.end(), k.begin(), ::tolower);
+    
+    k.erase(k.find_last_not_of(" \t\r\n") + 1);
 
-    transform(name.begin(), name.end(), name.begin(), ::tolower);
+    string v = val;
+    string v_clean = "";
+    bool last_was_space = false;
 
-    size_t end = value.find_last_not_of(" \t\r\n");
-    if (end != string::npos)
-        value = value.substr(0, end + 1);
-
-    size_t start = value.find_first_not_of(" \t\r\n");
-    if (start != string::npos)
-        value = value.substr(start);
-    else
-        value = "";
-
-    string canonical_value;
-    bool in_space = false;
-    for (char c : value)
-    {
-        if (c == ' ' || c == '\t')
-        {
-            if (!in_space)
-            {
-                canonical_value += ' ';
-                in_space = true;
+    for (char c : v) {
+        if (c == '\r' || c == '\n' || c == '\t' || c == ' ') {
+            if (!last_was_space) {
+                v_clean += ' ';
+                last_was_space = true;
             }
-        }
-        else
-        {
-            canonical_value += c;
-            in_space = false;
+        } else {
+            v_clean += c;
+            last_was_space = false;
         }
     }
 
-    return name + ":" + canonical_value;
+    size_t start = v_clean.find_first_not_of(" ");
+    size_t end = v_clean.find_last_not_of(" ");
+    
+    if (start != string::npos && end != string::npos) {
+        v_clean = v_clean.substr(start, end - start + 1);
+    } else {
+        v_clean = "";
+    }
+
+    return k + ": " + v_clean;
 }
 
 string canonicalize_body_relaxed(const string& body)
@@ -1782,8 +1781,9 @@ string get_dkim_pkey(const string& domain, const string& selector)
         return "";
     }
 
-    string pkey = "";
+    string txt_record = "";
     int count = ns_msg_count(handle, ns_s_an);
+    
     for (int i = 0; i < count; i++)
     {
         ns_rr rr;
@@ -1792,48 +1792,108 @@ string get_dkim_pkey(const string& domain, const string& selector)
         
         if (ns_rr_type(rr) == ns_t_txt)
         {
-            const unsigned char* data = ns_rr_rdata(rr);
-            int txt_len = data[0];
-            string txt_record((const char*)(data + 1), txt_len);
+            const unsigned char* rdata = ns_rr_rdata(rr);
+            int rdlength = ns_rr_rdlen(rr);
+            int off = 0;
 
-            size_t pos = txt_record.find("p=");
-            if (pos != string::npos)
-            {
-                pkey = txt_record.substr(pos + 2);
-                size_t end_p = pkey.find_first_of("; ");
-                if (end_p != string::npos)
-                    pkey = pkey.substr(0, end_p);
-                break;
+            // Reconstruim tot record-ul TXT chiar dacă este fragmentat în bucăți de 255 octeți
+            while (off < rdlength) {
+                int len = rdata[off];
+                off++;
+                if (off + len <= rdlength) {
+                    txt_record.append((const char*)(rdata + off), len);
+                }
+                off += len;
             }
+            break;
         }
     }
 
     res_nclose(&stat);
+
+    if (txt_record.empty())
+        return "";
+
+    // Căutăm p= în textul asamblat
+    size_t pos = txt_record.find("p=");
+    if (pos == string::npos)
+        return "";
+
+    string pkey = txt_record.substr(pos + 2);
     
-    return pkey;
+    // Tăiem până la primul punct și virgulă dacă există
+    size_t end_p = pkey.find(';');
+    if (end_p != string::npos)
+        pkey = pkey.substr(0, end_p);
+
+    // SANITIZARE CRUCIALĂ PENTRU OPENSSL:
+    // Eliminăm spațiile, newline-urile, tab-urile și GHILIMELELE (")
+    string clean_pkey = "";
+    for (char c : pkey) {
+        if (c != ' ' && c != '\t' && c != '\r' && c != '\n' && c != '"' && c != '\'') {
+            clean_pkey += c;
+        }
+    }
+    
+    return clean_pkey;
 }
 
 bool verify_dkim(const email& mail)
 {
     try
     {
-        auto it = mail.corp.headers.find("DKIM-Signature");
-        if (it == mail.corp.headers.end())
-        {
+        size_t header_end = mail.corp.raw_mail.find("\r\n\r\n");
+        if (header_end == string::npos) {
+            header_end = mail.corp.raw_mail.find("\n\n");
+        }
+
+        string raw_headers_str = (header_end != string::npos) ? mail.corp.raw_mail.substr(0, header_end) : mail.corp.raw_mail;
+        struct RawHeader {
+            string key;
+            string value;
+            bool used_for_dkim = false;
+        };
+        vector<RawHeader> parsed_headers;
+
+        stringstream raw_ss(raw_headers_str);
+        string line;
+        while (getline(raw_ss, line)) {
+            if (!line.empty() && line.back() == '\r') 
+                line.pop_back();
+
+            if (!line.empty() && (line[0] == ' ' || line[0] == '\t')) {
+                if (!parsed_headers.empty()) {
+                    parsed_headers.back().value += "\r\n" + line;
+                }
+            } else {
+                size_t colon_pos = line.find(':');
+                if (colon_pos != string::npos) {
+                    string k = line.substr(0, colon_pos);
+                    string v = line.substr(colon_pos + 1);
+                    parsed_headers.push_back({k, v, false});
+                }
+            }
+        }
+
+        string dkim_val = "";
+        for (auto it = parsed_headers.rbegin(); it != parsed_headers.rend(); ++it) {
+            if (strcasecmp(it->key.c_str(), "DKIM-Signature") == 0) {
+                dkim_val = it->value;
+                break;
+            }
+        }
+
+        if (dkim_val.empty()) {
             sprint("[SERVER DKIM ", this_thread::get_id(), "] No DKIM-Signature header found!", '\n');
             return false;
         }
 
-        string dkim_val = it->second;
-
         map<string, string> tags;
         stringstream ss(dkim_val);
         string token;
-        while(getline(ss, token, ';'))
-        {
+        while (getline(ss, token, ';')) {
             size_t eq = token.find('=');
-            if (eq != string::npos)
-            {
+            if (eq != string::npos) {
                 string key = token.substr(0, eq);
                 string val = token.substr(eq + 1);
 
@@ -1846,15 +1906,13 @@ bool verify_dkim(const email& mail)
             }
         }
 
-        if (tags["d"].empty() || tags["s"].empty() || tags["b"].empty() || tags["bh"].empty() || tags["h"].empty())
-        {
+        if (tags["d"].empty() || tags["s"].empty() || tags["b"].empty() || tags["bh"].empty() || tags["h"].empty()) {
             sprint("[SERVER DKIM ", this_thread::get_id(), "] Missing required DKIM tags!", '\n');
             return false;
         }
 
         string pkey = get_dkim_pkey(tags["d"], tags["s"]);
-        if (pkey.empty())
-        {
+        if (pkey.empty()) {
             sprint("[SERVER DKIM ", this_thread::get_id(), "] Error couldn't fetch public key from DNS!", '\n');
             return false;
         }
@@ -1868,8 +1926,7 @@ bool verify_dkim(const email& mail)
         EVP_PKEY* p_key = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
         BIO_free(bio);
 
-        if (!p_key)
-        {
+        if (!p_key) {
             sprint("[SERVER DKIM ", this_thread::get_id(), "] Failed to parse public key in OpenSSL", '\n');
             return false;
         }
@@ -1878,15 +1935,16 @@ bool verify_dkim(const email& mail)
         unsigned char computed_bh[EVP_MAX_MD_SIZE];
         unsigned int bh_len = 0;
 
+        const EVP_MD* md_type = (tags["a"] == "rsa-sha1") ? EVP_sha1() : EVP_sha256();
+
         EVP_MD_CTX* hash_ctx = EVP_MD_CTX_new();
-        EVP_DigestInit(hash_ctx, EVP_sha256());
+        EVP_DigestInit(hash_ctx, md_type);
         EVP_DigestUpdate(hash_ctx, (unsigned char*)canonical_body.c_str(), canonical_body.length());
         EVP_DigestFinal(hash_ctx, computed_bh, &bh_len);
         EVP_MD_CTX_free(hash_ctx);
 
         string computed_bh_b64 = base64_encode(computed_bh, bh_len);
-        if (computed_bh_b64 != tags["bh"])
-        {
+        if (computed_bh_b64 != tags["bh"]) {
             sprint("[SERVER DKIM ", this_thread::get_id(), "] Body Hash Missmatch!", '\n');
             EVP_PKEY_free(p_key);
             return false;
@@ -1896,27 +1954,31 @@ bool verify_dkim(const email& mail)
         string header_name;
         string headers_to_verify = "";
 
-        while(getline(h_ss, header_name, ':'))
-        {
-            for (const auto& [k, v] : mail.corp.headers)
-            {
-                if (strcasecmp(k.c_str(), header_name.c_str()) == 0)
-                {
-                    headers_to_verify += canonicalize_header_relaxed(k, v) + "\r\n";
+        while (getline(h_ss, header_name, ':')) {
+            header_name.erase(0, header_name.find_first_not_of(" \t\r\n"));
+            header_name.erase(header_name.find_last_not_of(" \t\r\n") + 1);
+
+            for (auto it = parsed_headers.rbegin(); it != parsed_headers.rend(); ++it) {
+                if (!it->used_for_dkim && strcasecmp(it->key.c_str(), header_name.c_str()) == 0) {
+                    headers_to_verify += canonicalize_header_relaxed(it->key, it->value) + "\r\n";
+                    it->used_for_dkim = true;
                     break;
                 }
             }
         }
 
         size_t b_pos = dkim_val.find("b=");
-        string dkim_header_no_b = dkim_val.substr(0, b_pos + 2);
+        string dkim_no_b = dkim_val.substr(0, b_pos + 2);
 
-        headers_to_verify += canonicalize_header_relaxed("DKIM-Signature", dkim_header_no_b);
+        headers_to_verify += canonicalize_header_relaxed("DKIM-Signature", dkim_no_b) + "\r\n";
 
         string sig_raw = base64_decode(tags["b"]);
 
         EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
-        EVP_VerifyInit(md_ctx, EVP_sha256());
+        EVP_VerifyInit(md_ctx, md_type);
+        cout << "--- HEADERS TO VERIFY ---" << endl;
+        cout << headers_to_verify;
+        cout << "-------------------------" << endl;
         EVP_VerifyUpdate(md_ctx, (unsigned char*)headers_to_verify.c_str(), headers_to_verify.length());
 
         int res = EVP_VerifyFinal(md_ctx, (unsigned char*)sig_raw.c_str(), sig_raw.length(), p_key);
@@ -1924,23 +1986,18 @@ bool verify_dkim(const email& mail)
         EVP_MD_CTX_free(md_ctx);
         EVP_PKEY_free(p_key);
 
-        if (res == 1)
-        {
+        if (res == 1) {
             sprint("[SERVER DKIM ", this_thread::get_id(), "] Success: DKIM Signature Validated!", '\n');
             return true;
-        }
-        else
-        {
+        } else {
             sprint("[SERVER DKIM ", this_thread::get_id(), "] Fail: Signature Verification Failed!", '\n');
             return false;
         }
     }
-    catch(const exception& e)
-    {
+    catch (const exception& e) {
         sprint("[SERVER DKIM ", this_thread::get_id(), "] Error: ", e.what(), '\n');
         return false;
     }
-    
 }
 
 string get_dmarc_policy(const string& domain)
