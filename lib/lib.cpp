@@ -36,6 +36,13 @@ struct SPFvalidation
     string observation = "";
 };
 
+struct DMARCresult
+{
+    bool pass;
+    string policy;
+    string reason;
+};
+
 struct MAILaddress
 {
     string domain = "";
@@ -64,6 +71,8 @@ void print_err_ssl();
 string canonicalize_header_relaxed(const string& header_name, const string& header_value);
 string canonicalize_body_relaxed(const string& body);
 string sign_dkim_openssl(const email& mail, const string& domain, const string& selector, const string& key_path);
+bool verify_dkim(const email& mail);
+DMARCresult verify_dmarc(const email& mail, bool spf_pass, const string& spf_domain, bool dkim_pass, const string& dkim_domain);
 
 
 void error(int code)
@@ -695,12 +704,10 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
     }
 
     SPFvalidation val;
-    if (is_auth)
-        val.is_valid = true;
-    else
+    if (!is_auth)
         val = address_validity(address.c_str(), sockfd);
 
-    if (!val.is_valid)
+    if (!val.is_valid && !is_auth)
     {
         code = SSL_write(ssl, val.error_response.c_str(), val.error_response.length());
         SSL_free(ssl);
@@ -711,13 +718,19 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
 
     sprint("[SERVER ", this_thread::get_id(), "] Sender received!", '\n');
 
-    if (val.observation != "")
+    if (!is_auth)
     {
-        mail.corp.headers["X-Spam-Flag"] = "YES";
-        mail.corp.headers["X-Spam-Mess"] = val.observation;
+        if (val.observation != "")
+        {
+            mail.corp.headers["X-SPF-Status"] = "FAIL / UNSURE";
+            mail.corp.headers["X-SPF-Mess"] = val.observation;
+        }
+        else
+            mail.corp.headers["X-SPF-Status"] = "PASS";
     }
-    else
-        mail.corp.headers["X-Spam-Flag"] = "NO";
+
+    bool spf_pass = val.is_valid && val.observation.empty();
+
 
     mail.anvelopa.sender = address;
 
@@ -898,6 +911,72 @@ email recv_email_wthehl(int sockfd, SSL* ssl, string mail_domain, bool is_auth)
     }
 
     mail.corp.body = body;
+
+    if (!is_auth)
+    {
+        bool dkim_ok = verify_dkim(mail);
+    if (dkim_ok)
+        mail.corp.headers["X-DKIM-Status"] = "PASS";
+    else
+        mail.corp.headers["X-DKIM-Status"] = "FAIL";
+
+    MAILaddress sender_mail = split_address(mail.anvelopa.sender.c_str());
+    string dkim_domain = "";
+
+    auto dkim_it = mail.corp.headers.find("DKIM-Signature");
+    if (dkim_it != mail.corp.headers.end())
+    {
+        size_t d_pos = dkim_it->second.find("d=");
+        if (d_pos != string::npos)
+        {
+            dkim_domain = dkim_it->second.substr(d_pos + 2);
+            size_t end_d = dkim_domain.find_first_of("; ");
+            if (end_d != string::npos)
+                dkim_domain = dkim_domain.substr(0, end_d);
+        }
+    }
+
+    DMARCresult dmarc = verify_dmarc(mail, spf_pass, sender_mail.domain, dkim_ok, dkim_domain);
+    sprint("[SERVER ", this_thread::get_id(), "] DMARC Status: ", (dmarc.pass ? "PASS" : "FAIL"), 
+           " (Policy: ", dmarc.policy, ")\n");
+        
+    if (!dmarc.pass)
+    {
+        if (dmarc.policy == "reject")
+        {
+           sprint("[SERVER ", this_thread::get_id(), "] Rejecting email due to DMARC policy 'reject'\n");
+           mess.clear();
+           mess = "550 5.7.1 Email rejected per DMARC policy\r\n";
+           code = SSL_write(ssl, mess.c_str(), mess.length());
+           error(code);
+
+           SSL_free(ssl);
+           close(sockfd);
+           return email();
+        }
+
+        else if (dmarc.policy == "quarantine")
+        {
+            mail.corp.headers["X-Spam-Flag"] = "YES";
+            mail.corp.headers["X-DMARC-Status"] = "FAIL (Quarantine)";
+            mail.corp.headers["X-DMARC-Mess"] = dmarc.reason;
+        }
+        else
+        {
+            if (!spf_pass)
+            {
+                mail.corp.headers["X-Spam-Flag"] = "YES";
+                mail.corp.headers["X-Spam-Mess"] = val.observation;
+            }
+            else
+                mail.corp.headers["X-Spam-Flag"] = "NO";
+            
+            mail.corp.headers["X-DMARC-Status"] = "FAIL (None)";
+        }
+    }
+    else
+        mail.corp.headers["X-DMARC-Status"] = "PASS";
+    }
 
     mess.clear();
     mess = "250 2.0.0 OK (Mail accepted for delivery)\r\n";
@@ -1212,11 +1291,17 @@ vector<string> get_mx_servers(const string& domain)
 
     unsigned char response[1024];
 
-    int length = res_search(domain.c_str(), ns_c_in, ns_t_mx, response, sizeof(response));
+    struct __res_state stat;
+    memset(&stat, 0, sizeof(stat));
+    if (res_ninit(&stat) != 0)
+        return mx_servers;
+
+    int length = res_nsearch(&stat, domain.c_str(), ns_c_in, ns_t_mx, response, sizeof(response));
 
     if (length < 0)
     {
         sprint("[ERROR ", this_thread::get_id(), "] Could not find the MX servers for the given domain!", '\n');
+        res_nclose(&stat);
         return mx_servers;
     }
 
@@ -1224,6 +1309,7 @@ vector<string> get_mx_servers(const string& domain)
     if (ns_initparse(response, length, &handle) < 0)
     {
         sprint("[ERROR ", this_thread::get_id(), "] Error at initializing the DNS parser!", '\n');
+        res_nclose(&stat);
         return mx_servers;
     }
 
@@ -1254,6 +1340,7 @@ vector<string> get_mx_servers(const string& domain)
         }
     }
 
+    res_nclose(&stat);
     return mx_servers;
 }
 
@@ -1669,4 +1756,295 @@ string clear_clr(string resp)
 string sign_dkim(const email& email, const string& domain, const string& selector, const string& key_path)
 {
     return sign_dkim_openssl(email, domain, selector, key_path);
+}
+
+string get_dkim_pkey(const string& domain, const string& selector)
+{
+    string dkim_dns = selector + "._domainkey." + domain;
+    unsigned char response[2048];
+
+    struct __res_state stat;
+    memset(&stat, 0, sizeof(stat));
+    if (res_ninit(&stat) != 0)
+        return "";
+    
+    int length = res_nsearch(&stat, dkim_dns.c_str(), ns_c_in, ns_t_txt, response, sizeof(response));
+    if (length < 0)
+    {
+        res_nclose(&stat);
+        return "";
+    }
+
+    ns_msg handle;
+    if (ns_initparse(response, length, &handle) < 0)
+    {
+        res_nclose(&stat);
+        return "";
+    }
+
+    string pkey = "";
+    int count = ns_msg_count(handle, ns_s_an);
+    for (int i = 0; i < count; i++)
+    {
+        ns_rr rr;
+        if (ns_parserr(&handle, ns_s_an, i, &rr) < 0)
+            continue;
+        
+        if (ns_rr_type(rr) == ns_t_txt)
+        {
+            const unsigned char* data = ns_rr_rdata(rr);
+            int txt_len = data[0];
+            string txt_record((const char*)(data + 1), txt_len);
+
+            size_t pos = txt_record.find("p=");
+            if (pos != string::npos)
+            {
+                pkey = txt_record.substr(pos + 2);
+                size_t end_p = pkey.find_first_of("; ");
+                if (end_p != string::npos)
+                    pkey = pkey.substr(0, end_p);
+                break;
+            }
+        }
+    }
+
+    res_nclose(&stat);
+    
+    return pkey;
+}
+
+bool verify_dkim(const email& mail)
+{
+    try
+    {
+        auto it = mail.corp.headers.find("DKIM-Signature");
+        if (it == mail.corp.headers.end())
+        {
+            sprint("[SERVER DKIM ", this_thread::get_id(), "] No DKIM-Signature header found!", '\n');
+            return false;
+        }
+
+        string dkim_val = it->second;
+
+        map<string, string> tags;
+        stringstream ss(dkim_val);
+        string token;
+        while(getline(ss, token, ';'))
+        {
+            size_t eq = token.find('=');
+            if (eq != string::npos)
+            {
+                string key = token.substr(0, eq);
+                string val = token.substr(eq + 1);
+
+                key.erase(0, key.find_first_not_of(" \t\r\n"));
+                key.erase(key.find_last_not_of(" \t\r\n") + 1);
+                val.erase(0, val.find_first_not_of(" \t\r\n"));
+                val.erase(val.find_last_not_of(" \t\r\n") + 1);
+
+                tags[key] = val;
+            }
+        }
+
+        if (tags["d"].empty() || tags["s"].empty() || tags["b"].empty() || tags["bh"].empty() || tags["h"].empty())
+        {
+            sprint("[SERVER DKIM ", this_thread::get_id(), "] Missing required DKIM tags!", '\n');
+            return false;
+        }
+
+        string pkey = get_dkim_pkey(tags["d"], tags["s"]);
+        if (pkey.empty())
+        {
+            sprint("[SERVER DKIM ", this_thread::get_id(), "] Error couldn't fetch public key from DNS!", '\n');
+            return false;
+        }
+
+        string pem_key = "-----BEGIN PUBLIC KEY-----\n";
+        for (size_t i = 0; i < pkey.length(); i += 64)
+            pem_key += pkey.substr(i, 64) + "\n";
+        pem_key += "-----END PUBLIC KEY-----\n";
+
+        BIO* bio = BIO_new_mem_buf(pem_key.data(), pem_key.length());
+        EVP_PKEY* p_key = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
+        BIO_free(bio);
+
+        if (!p_key)
+        {
+            sprint("[SERVER DKIM ", this_thread::get_id(), "] Failed to parse public key in OpenSSL", '\n');
+            return false;
+        }
+
+        string canonical_body = canonicalize_body_relaxed(mail.corp.body);
+        unsigned char computed_bh[EVP_MAX_MD_SIZE];
+        unsigned int bh_len = 0;
+
+        EVP_MD_CTX* hash_ctx = EVP_MD_CTX_new();
+        EVP_DigestInit(hash_ctx, EVP_sha256());
+        EVP_DigestUpdate(hash_ctx, (unsigned char*)canonical_body.c_str(), canonical_body.length());
+        EVP_DigestFinal(hash_ctx, computed_bh, &bh_len);
+        EVP_MD_CTX_free(hash_ctx);
+
+        string computed_bh_b64 = base64_encode(computed_bh, bh_len);
+        if (computed_bh_b64 != tags["bh"])
+        {
+            sprint("[SERVER DKIM ", this_thread::get_id(), "] Body Hash Missmatch!", '\n');
+            EVP_PKEY_free(p_key);
+            return false;
+        }
+
+        stringstream h_ss(tags["h"]);
+        string header_name;
+        string headers_to_verify = "";
+
+        while(getline(h_ss, header_name, ':'))
+        {
+            for (const auto& [k, v] : mail.corp.headers)
+            {
+                if (strcasecmp(k.c_str(), header_name.c_str()) == 0)
+                {
+                    headers_to_verify += canonicalize_header_relaxed(k, v) + "\r\n";
+                    break;
+                }
+            }
+        }
+
+        size_t b_pos = dkim_val.find("b=");
+        string dkim_header_no_b = dkim_val.substr(0, b_pos + 2);
+
+        headers_to_verify += canonicalize_header_relaxed("DKIM-Signature", dkim_header_no_b);
+
+        string sig_raw = base64_decode(tags["b"]);
+
+        EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
+        EVP_VerifyInit(md_ctx, EVP_sha256());
+        EVP_VerifyUpdate(md_ctx, (unsigned char*)headers_to_verify.c_str(), headers_to_verify.length());
+
+        int res = EVP_VerifyFinal(md_ctx, (unsigned char*)sig_raw.c_str(), sig_raw.length(), p_key);
+
+        EVP_MD_CTX_free(md_ctx);
+        EVP_PKEY_free(p_key);
+
+        if (res == 1)
+        {
+            sprint("[SERVER DKIM ", this_thread::get_id(), "] Success: DKIM Signature Validated!", '\n');
+            return true;
+        }
+        else
+        {
+            sprint("[SERVER DKIM ", this_thread::get_id(), "] Fail: Signature Verification Failed!", '\n');
+            return false;
+        }
+    }
+    catch(const exception& e)
+    {
+        sprint("[SERVER DKIM ", this_thread::get_id(), "] Error: ", e.what(), '\n');
+        return false;
+    }
+    
+}
+
+string get_dmarc_policy(const string& domain)
+{
+    string dmarc_dns = "_dmarc." + domain;
+    unsigned char response[2048];
+
+    struct __res_state stat;
+    memset(&stat, 0, sizeof(stat));
+    if (res_ninit(&stat) != 0)
+        return "none";
+    
+    int length = res_nsearch(&stat, dmarc_dns.c_str(), ns_c_in, ns_t_txt, response, sizeof(response));
+    if (length < 0)
+    {
+        res_nclose(&stat);
+        return "none";
+    }
+
+    ns_msg handle;
+    if (ns_initparse(response, length, &handle) < 0)
+    {
+        res_nclose(&stat);
+        return "none";
+    }
+
+    string policy = "none";
+    int count = ns_msg_count(handle, ns_s_an);
+    for (int i = 0; i < count; i++)
+    {
+        ns_rr rr;
+        if (ns_parserr(&handle, ns_s_an, i, &rr) < 0)
+            continue;
+        
+        if (ns_rr_type(rr) == ns_t_txt)
+        {
+            const unsigned char* data = ns_rr_rdata(rr);
+            int txt_len = data[0];
+
+            string txt_record((const char*)(data + 1), txt_len);
+
+            size_t pos = txt_record.find("p=");
+            if (pos != string::npos)
+            {
+                string p_val = txt_record.substr(pos + 2);
+                size_t end_p = p_val.find_first_of("; ");
+                if (end_p != string::npos)
+                    p_val = p_val.substr(0, end_p);
+                policy = p_val;
+                break;
+            }
+        }
+    }
+
+    res_nclose(&stat);
+    return policy;
+}
+
+DMARCresult verify_dmarc(const email& mail, bool spf_pass, const string& spf_domain, bool dkim_pass, const string& dkim_domain)
+{
+    DMARCresult result;
+    result.pass = false;
+    result.policy = "none";
+
+    auto it = mail.corp.headers.find("From");
+    if (it == mail.corp.headers.end())
+    {
+        result.reason = "Missing From header";
+        return result;
+    }
+
+    string from_address = extract_address(it->second);
+    MAILaddress from_mail = split_address(from_address.c_str());
+    string from_domain = from_mail.domain;
+
+    transform(from_domain.begin(), from_domain.end(), from_domain.begin(), ::tolower);
+
+    if (from_domain.empty())
+    {
+        result.reason = "Invalid From domain";
+        return result;
+    }
+
+    result.policy = get_dmarc_policy(from_domain);
+
+    string spf_dom_clean = spf_domain;
+    transform(spf_dom_clean.begin(), spf_dom_clean.end(), spf_dom_clean.begin(), ::tolower);
+    bool spf_aligned = spf_pass && (from_domain == spf_dom_clean || from_domain.ends_with("." + spf_dom_clean));
+
+    string dkim_dom_clean = dkim_domain;
+    transform(dkim_dom_clean.begin(), dkim_dom_clean.end(), dkim_dom_clean.begin(), ::tolower);
+    bool dkim_aligned = dkim_pass && (from_domain == dkim_dom_clean || from_domain.ends_with("." + dkim_dom_clean));
+
+    if (spf_aligned || dkim_aligned)
+    {
+        result.pass = true;
+        result.reason = "DMARC passed (SPF aligned: " + string(spf_aligned ? "yes" : "no") + 
+                        ", DKIM aligned: " + string(dkim_aligned ? "yes" : "no") + ")";
+    }
+    else
+    {
+        result.pass = false;
+        result.reason = "DMARC failed alignment";
+    }
+    
+    return result;
 }
