@@ -1843,50 +1843,41 @@ bool verify_dkim(const email& mail)
     try
     {
         size_t header_end = mail.corp.raw_mail.find("\r\n\r\n");
-        if (header_end == string::npos) {
+        if (header_end == std::string::npos) {
             header_end = mail.corp.raw_mail.find("\n\n");
         }
 
-        string raw_headers_str = (header_end != string::npos) ? mail.corp.raw_mail.substr(0, header_end) : mail.corp.raw_mail;
+        std::string raw_headers_str = (header_end != std::string::npos) 
+                                     ? mail.corp.raw_mail.substr(0, header_end) 
+                                     : mail.corp.raw_mail;
+
         struct RawHeader {
-            string key;
-            string value;
+            std::string key;
+            std::string value;
             bool used_for_dkim = false;
         };
-        vector<RawHeader> parsed_headers;
+        std::vector<RawHeader> parsed_headers;
 
-        stringstream raw_ss(raw_headers_str);
-        string line;
-        while (getline(raw_ss, line)) {
-            if (!line.empty() && line.back() == '\r')
-                line.pop_back();
+        std::stringstream raw_ss(raw_headers_str);
+        std::string line;
+        while (std::getline(raw_ss, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
 
             if (!line.empty() && (line[0] == ' ' || line[0] == '\t')) {
                 if (!parsed_headers.empty()) {
-                    // unfold continuation: replace CRLF + WSP with single space
-                    size_t start = line.find_first_not_of(" \t");
-                    if (start != string::npos)
-                        parsed_headers.back().value += " " + line.substr(start);
-                    else
-                        parsed_headers.back().value += " ";
+                    parsed_headers.back().value += " " + line;
                 }
             } else {
                 size_t colon_pos = line.find(':');
-                if (colon_pos != string::npos) {
-                    string k = line.substr(0, colon_pos);
-                    string v = (colon_pos + 1 < line.size()) ? line.substr(colon_pos + 1) : string();
-                    // trim leading whitespace from value
-                    size_t vs = v.find_first_not_of(" \t");
-                    if (vs != string::npos)
-                        v = v.substr(vs);
-                    else
-                        v = "";
+                if (colon_pos != std::string::npos) {
+                    std::string k = line.substr(0, colon_pos);
+                    std::string v = line.substr(colon_pos + 1);
                     parsed_headers.push_back({k, v, false});
                 }
             }
         }
 
-        string dkim_val = "";
+        std::string dkim_val = "";
         for (auto it = parsed_headers.rbegin(); it != parsed_headers.rend(); ++it) {
             if (strcasecmp(it->key.c_str(), "DKIM-Signature") == 0) {
                 dkim_val = it->value;
@@ -1895,40 +1886,49 @@ bool verify_dkim(const email& mail)
         }
 
         if (dkim_val.empty()) {
-            sprint("[SERVER DKIM ", this_thread::get_id(), "] No DKIM-Signature header found!", '\n');
+            sprint("[SERVER DKIM ", std::this_thread::get_id(), "] No DKIM-Signature header found!", '\n');
             return false;
         }
 
-        map<string, string> tags;
-        stringstream ss(dkim_val);
-        string token;
-        while (getline(ss, token, ';')) {
+        std::map<std::string, std::string> tags;
+        std::stringstream ss(dkim_val);
+        std::string token;
+        while (std::getline(ss, token, ';')) {
             size_t eq = token.find('=');
-            if (eq != string::npos) {
-                string key = token.substr(0, eq);
-                string val = token.substr(eq + 1);
+            if (eq != std::string::npos) {
+                std::string key = token.substr(0, eq);
+                std::string val = token.substr(eq + 1);
 
                 key.erase(0, key.find_first_not_of(" \t\r\n"));
                 key.erase(key.find_last_not_of(" \t\r\n") + 1);
                 val.erase(0, val.find_first_not_of(" \t\r\n"));
                 val.erase(val.find_last_not_of(" \t\r\n") + 1);
 
+                if (key == "b" || key == "bh") {
+                    std::string val_no_ws = "";
+                    for (char c : val) {
+                        if (c != ' ' && c != '\t' && c != '\r' && c != '\n')
+                            val_no_ws += c;
+                    }
+                    val = val_no_ws;
+                }
+
                 tags[key] = val;
             }
         }
 
         if (tags["d"].empty() || tags["s"].empty() || tags["b"].empty() || tags["bh"].empty() || tags["h"].empty()) {
-            sprint("[SERVER DKIM ", this_thread::get_id(), "] Missing required DKIM tags!", '\n');
+            sprint("[SERVER DKIM ", std::this_thread::get_id(), "] Missing required DKIM tags!", '\n');
             return false;
         }
 
-        string pkey = get_dkim_pkey(tags["d"], tags["s"]);
+        std::string pkey = get_dkim_pkey(tags["d"], tags["s"]);
         if (pkey.empty()) {
-            sprint("[SERVER DKIM ", this_thread::get_id(), "] Error couldn't fetch public key from DNS!", '\n');
+            sprint("[SERVER DKIM ", std::this_thread::get_id(), "] Error couldn't fetch public key from DNS!", '\n');
             return false;
         }
 
-        string pem_key = "-----BEGIN PUBLIC KEY-----\n";
+        std::string pem_key = "-----BEGIN PUBLIC KEY-----\n";
         for (size_t i = 0; i < pkey.length(); i += 64)
             pem_key += pkey.substr(i, 64) + "\n";
         pem_key += "-----END PUBLIC KEY-----\n";
@@ -1938,11 +1938,11 @@ bool verify_dkim(const email& mail)
         BIO_free(bio);
 
         if (!p_key) {
-            sprint("[SERVER DKIM ", this_thread::get_id(), "] Failed to parse public key in OpenSSL", '\n');
+            sprint("[SERVER DKIM ", std::this_thread::get_id(), "] Failed to parse public key in OpenSSL", '\n');
             return false;
         }
 
-        string canonical_body = canonicalize_body_relaxed(mail.corp.body);
+        std::string canonical_body = canonicalize_body_relaxed(mail.corp.body);
         unsigned char computed_bh[EVP_MAX_MD_SIZE];
         unsigned int bh_len = 0;
 
@@ -1954,74 +1954,60 @@ bool verify_dkim(const email& mail)
         EVP_DigestFinal(hash_ctx, computed_bh, &bh_len);
         EVP_MD_CTX_free(hash_ctx);
 
-        string computed_bh_b64 = base64_encode(computed_bh, bh_len);
+        std::string computed_bh_b64 = base64_encode(computed_bh, bh_len);
         if (computed_bh_b64 != tags["bh"]) {
-            sprint("[SERVER DKIM ", this_thread::get_id(), "] Body Hash Missmatch!", '\n');
+            sprint("[SERVER DKIM ", std::this_thread::get_id(), "] Body Hash Missmatch!", '\n');
             EVP_PKEY_free(p_key);
             return false;
         }
 
-        stringstream h_ss(tags["h"]);
-        string header_name;
-        string headers_to_verify = "";
-        map<string, int> header_usage;
+        std::string headers_to_verify = "";
+        std::stringstream h_ss(tags["h"]);
+        std::string header_name;
 
-        auto find_header_value = [&](const string& name, int occurrence_count) -> pair<bool, string> {
-            int seen = 0;
-            for (int i = (int)parsed_headers.size() - 1; i >= 0; --i) {
-                if (strcasecmp(parsed_headers[i].key.c_str(), name.c_str()) == 0) {
-                    if (seen == occurrence_count) {
-                        return {true, parsed_headers[i].value};
-                    }
-                    ++seen;
-                }
-            }
-
-            int map_seen = 0;
-            for (const auto& [k, v] : mail.corp.headers) {
-                if (strcasecmp(k.c_str(), name.c_str()) == 0) {
-                    if (map_seen == occurrence_count) {
-                        return {true, v};
-                    }
-                    ++map_seen;
-                }
-            }
-
-            return {false, ""};
-        };
-
-        while (getline(h_ss, header_name, ':')) {
+        while (std::getline(h_ss, header_name, ':')) {
             header_name.erase(0, header_name.find_first_not_of(" \t\r\n"));
             header_name.erase(header_name.find_last_not_of(" \t\r\n") + 1);
 
-            auto found_value = find_header_value(header_name, header_usage[header_name]);
-            if (found_value.first) {
-                headers_to_verify += canonicalize_header_relaxed(header_name, found_value.second) + "\r\n";
-                ++header_usage[header_name];
-            } else {
-                sprint("[SERVER DKIM ", this_thread::get_id(), "] Could not find header instance for h= list: ", header_name, '\n');
-                EVP_PKEY_free(p_key);
-                return false;
+            bool found = false;
+            for (auto it = parsed_headers.rbegin(); it != parsed_headers.rend(); ++it) {
+                if (!it->used_for_dkim && strcasecmp(it->key.c_str(), header_name.c_str()) == 0) {
+                    headers_to_verify += canonicalize_header_relaxed(it->key, it->value) + "\r\n";
+                    it->used_for_dkim = true;
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                std::string k = header_name;
+                std::transform(k.begin(), k.end(), k.begin(), ::tolower);
+                headers_to_verify += k + ":\r\n";
             }
         }
 
-        // remove trailing CRLF added in the loop to match signing behavior
-        if (!headers_to_verify.empty() && headers_to_verify.size() >= 2)
-            headers_to_verify = headers_to_verify.substr(0, headers_to_verify.size() - 2);
-
         size_t b_pos = dkim_val.find("b=");
-        string dkim_no_b = dkim_val.substr(0, b_pos + 2);
+        if (b_pos != std::string::npos) {
+            std::string dkim_prefix = dkim_val.substr(0, b_pos + 2);
+            size_t b_end = dkim_val.find(';', b_pos);
+            std::string dkim_suffix = (b_end != std::string::npos) ? dkim_val.substr(b_end) : "";
 
-        string data_to_verify = headers_to_verify + "\r\n" + canonicalize_header_relaxed("DKIM-Signature", dkim_no_b);
+            std::string dkim_to_canon = dkim_prefix + dkim_suffix;
+            headers_to_verify += canonicalize_header_relaxed("DKIM-Signature", dkim_to_canon);
+        }
 
-        string sig_raw = base64_decode(tags["b"]);
+        std::string sig_raw = base64_decode(tags["b"]);
 
         EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
         EVP_VerifyInit(md_ctx, md_type);
-        cout << "--- HEADERS TO VERIFY ---" << endl;
-        cout << data_to_verify;
-        cout << "-------------------------" << endl;
-        EVP_VerifyUpdate(md_ctx, (unsigned char*)data_to_verify.c_str(), data_to_verify.length());
+        cout << "--- STRING LENGTH: " << headers_to_verify.length() << " ---" << endl;
+for (char c : headers_to_verify) {
+    if (c == '\r') cout << "\\r";
+    else if (c == '\n') cout << "\\n\n";
+    else cout << c;
+}
+cout << "-------------------------" << endl;
+        EVP_VerifyUpdate(md_ctx, (unsigned char*)headers_to_verify.c_str(), headers_to_verify.length());
 
         int res = EVP_VerifyFinal(md_ctx, (unsigned char*)sig_raw.c_str(), sig_raw.length(), p_key);
 
@@ -2029,15 +2015,15 @@ bool verify_dkim(const email& mail)
         EVP_PKEY_free(p_key);
 
         if (res == 1) {
-            sprint("[SERVER DKIM ", this_thread::get_id(), "] Success: DKIM Signature Validated!", '\n');
+            sprint("[SERVER DKIM ", std::this_thread::get_id(), "] Success: DKIM Signature Validated!", '\n');
             return true;
         } else {
-            sprint("[SERVER DKIM ", this_thread::get_id(), "] Fail: Signature Verification Failed!", '\n');
+            sprint("[SERVER DKIM ", std::this_thread::get_id(), "] Fail: Signature Verification Failed!", '\n');
             return false;
         }
     }
-    catch (const exception& e) {
-        sprint("[SERVER DKIM ", this_thread::get_id(), "] Error: ", e.what(), '\n');
+    catch (const std::exception& e) {
+        sprint("[SERVER DKIM ", std::this_thread::get_id(), "] Error: ", e.what(), '\n');
         return false;
     }
 }
