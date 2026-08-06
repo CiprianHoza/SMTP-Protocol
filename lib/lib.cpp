@@ -1858,18 +1858,29 @@ bool verify_dkim(const email& mail)
         stringstream raw_ss(raw_headers_str);
         string line;
         while (getline(raw_ss, line)) {
-            if (!line.empty() && line.back() == '\r') 
+            if (!line.empty() && line.back() == '\r')
                 line.pop_back();
 
             if (!line.empty() && (line[0] == ' ' || line[0] == '\t')) {
                 if (!parsed_headers.empty()) {
-                    parsed_headers.back().value += "\r\n" + line;
+                    // unfold continuation: replace CRLF + WSP with single space
+                    size_t start = line.find_first_not_of(" \t");
+                    if (start != string::npos)
+                        parsed_headers.back().value += " " + line.substr(start);
+                    else
+                        parsed_headers.back().value += " ";
                 }
             } else {
                 size_t colon_pos = line.find(':');
                 if (colon_pos != string::npos) {
                     string k = line.substr(0, colon_pos);
-                    string v = line.substr(colon_pos + 1);
+                    string v = (colon_pos + 1 < line.size()) ? line.substr(colon_pos + 1) : string();
+                    // trim leading whitespace from value
+                    size_t vs = v.find_first_not_of(" \t");
+                    if (vs != string::npos)
+                        v = v.substr(vs);
+                    else
+                        v = "";
                     parsed_headers.push_back({k, v, false});
                 }
             }
@@ -1958,28 +1969,39 @@ bool verify_dkim(const email& mail)
             header_name.erase(0, header_name.find_first_not_of(" \t\r\n"));
             header_name.erase(header_name.find_last_not_of(" \t\r\n") + 1);
 
+            bool found = false;
             for (auto it = parsed_headers.rbegin(); it != parsed_headers.rend(); ++it) {
                 if (!it->used_for_dkim && strcasecmp(it->key.c_str(), header_name.c_str()) == 0) {
                     headers_to_verify += canonicalize_header_relaxed(it->key, it->value) + "\r\n";
                     it->used_for_dkim = true;
+                    found = true;
                     break;
                 }
             }
+            if (!found) {
+                sprint("[SERVER DKIM ", this_thread::get_id(), "] Could not find header instance for h= list: ", header_name, '\n');
+                EVP_PKEY_free(p_key);
+                return false;
+            }
         }
+
+        // remove trailing CRLF added in the loop to match signing behavior
+        if (!headers_to_verify.empty() && headers_to_verify.size() >= 2)
+            headers_to_verify = headers_to_verify.substr(0, headers_to_verify.size() - 2);
 
         size_t b_pos = dkim_val.find("b=");
         string dkim_no_b = dkim_val.substr(0, b_pos + 2);
 
-        headers_to_verify += canonicalize_header_relaxed("DKIM-Signature", dkim_no_b) + "\r\n";
+        string data_to_verify = headers_to_verify + "\r\n" + canonicalize_header_relaxed("DKIM-Signature", dkim_no_b);
 
         string sig_raw = base64_decode(tags["b"]);
 
         EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
         EVP_VerifyInit(md_ctx, md_type);
         cout << "--- HEADERS TO VERIFY ---" << endl;
-        cout << headers_to_verify;
+        cout << data_to_verify;
         cout << "-------------------------" << endl;
-        EVP_VerifyUpdate(md_ctx, (unsigned char*)headers_to_verify.c_str(), headers_to_verify.length());
+        EVP_VerifyUpdate(md_ctx, (unsigned char*)data_to_verify.c_str(), data_to_verify.length());
 
         int res = EVP_VerifyFinal(md_ctx, (unsigned char*)sig_raw.c_str(), sig_raw.length(), p_key);
 
