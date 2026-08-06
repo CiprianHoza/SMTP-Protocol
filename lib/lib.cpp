@@ -1971,21 +1971,16 @@ bool verify_dkim(const email& mail)
             header_name.erase(0, header_name.find_first_not_of(" \t\r\n"));
             header_name.erase(header_name.find_last_not_of(" \t\r\n") + 1);
 
-            bool found = false;
             for (auto it = parsed_headers.rbegin(); it != parsed_headers.rend(); ++it) {
                 if (!it->used_for_dkim && strcasecmp(it->key.c_str(), header_name.c_str()) == 0) {
                     headers_to_verify += canonicalize_header_relaxed(it->key, it->value) + "\r\n";
                     it->used_for_dkim = true;
-                    found = true;
                     break;
                 }
             }
 
-            if (!found) {
-                std::string k = header_name;
-                std::transform(k.begin(), k.end(), k.begin(), ::tolower);
-                headers_to_verify += k + ":\r\n";
-            }
+            // Oversigned fields which have no remaining occurrence in the
+            // message contribute no bytes to the signed header block.
         }
 
         // RFC 6376 requires the value of the DKIM-Signature b= tag to be
