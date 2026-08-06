@@ -1591,7 +1591,9 @@ string canonicalize_header_relaxed(const string& key, const string& val)
         v_clean = "";
     }
 
-    return k + ": " + v_clean;
+    // RFC 6376, relaxed header canonicalization: all whitespace around the
+    // colon is removed. WSP inside the field value is still compressed above.
+    return k + ":" + v_clean;
 }
 
 string canonicalize_body_relaxed(const string& body)
@@ -1986,17 +1988,64 @@ bool verify_dkim(const email& mail)
             }
         }
 
-        size_t b_pos = dkim_val.find("b=");
-        if (b_pos != std::string::npos) {
-            std::string dkim_prefix = dkim_val.substr(0, b_pos + 2);
-            size_t b_end = dkim_val.find(';', b_pos);
-            std::string dkim_suffix = (b_end != std::string::npos) ? dkim_val.substr(b_end) : "";
+        // RFC 6376 requires the value of the DKIM-Signature b= tag to be
+        // treated as empty while preserving the rest of the field value.
+        // Locate the actual tag at a semicolon boundary rather than relying on
+        // a broad substring match.
+        std::string dkim_to_canon = dkim_val;
+        size_t tag_start = 0;
+        bool emptied_signature_tag = false;
 
-            std::string dkim_to_canon = dkim_prefix + dkim_suffix;
-            headers_to_verify += canonicalize_header_relaxed("DKIM-Signature", dkim_to_canon);
+        while (tag_start < dkim_to_canon.size()) {
+            size_t tag_end = dkim_to_canon.find(';', tag_start);
+            if (tag_end == std::string::npos)
+                tag_end = dkim_to_canon.size();
+
+            size_t name_start = tag_start;
+            while (name_start < tag_end &&
+                   (dkim_to_canon[name_start] == ' ' || dkim_to_canon[name_start] == '\t' ||
+                    dkim_to_canon[name_start] == '\r' || dkim_to_canon[name_start] == '\n')) {
+                ++name_start;
+            }
+
+            size_t equals = dkim_to_canon.find('=', name_start);
+            if (equals < tag_end) {
+                size_t name_end = equals;
+                while (name_end > name_start &&
+                       (dkim_to_canon[name_end - 1] == ' ' || dkim_to_canon[name_end - 1] == '\t' ||
+                        dkim_to_canon[name_end - 1] == '\r' || dkim_to_canon[name_end - 1] == '\n')) {
+                    --name_end;
+                }
+
+                if (name_end - name_start == 1 &&
+                    std::tolower(static_cast<unsigned char>(dkim_to_canon[name_start])) == 'b') {
+                    dkim_to_canon.erase(equals + 1, tag_end - (equals + 1));
+                    emptied_signature_tag = true;
+                    break;
+                }
+            }
+
+            if (tag_end == dkim_to_canon.size())
+                break;
+            tag_start = tag_end + 1;
         }
 
+        if (!emptied_signature_tag) {
+            sprint("[SERVER DKIM ", std::this_thread::get_id(), "] Invalid DKIM-Signature b= tag!", '\n');
+            EVP_PKEY_free(p_key);
+            return false;
+        }
+
+        headers_to_verify += canonicalize_header_relaxed("DKIM-Signature", dkim_to_canon);
+
         std::string sig_raw = base64_decode(tags["b"]);
+
+        // --- DEBUG TEMPORAR ---
+cout << "b= raw tag length: " << tags["b"].length() << endl;
+cout << "b= raw tag value : " << tags["b"] << endl;
+cout << "sig_raw decoded length: " << sig_raw.length() << endl;
+cout << "RSA key size (bytes): " << EVP_PKEY_bits(p_key) / 8 << endl;
+// --- END DEBUG ---
 
         EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
         EVP_VerifyInit(md_ctx, md_type);
