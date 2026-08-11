@@ -196,7 +196,7 @@ void send_mail(int sockfd, email mail, string smtp_domain)
         error(code);
 
         response[sizeof(response) - 1] = '\0';
-        if (strncmp(response, "250", 3) != 0 || strncmp(response, "251", 3) != 0)
+        if (strncmp(response, "250", 3) != 0 && strncmp(response, "251", 3) != 0)
         {
             sprint("[CLIENT ", this_thread::get_id(), "] Error sending the email to ", rec, '\n');
             sprint("[CLIENT ", this_thread::get_id(), "] Error email message: ", string(response), '\n');
@@ -211,10 +211,6 @@ void send_mail(int sockfd, email mail, string smtp_domain)
         code = SSL_write(ssl, "QUIT\r\n", 6);
         error(code);
 
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        close(sockfd);
         throw std::runtime_error("Error sending any of the recipients!");
     }
 
