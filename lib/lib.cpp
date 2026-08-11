@@ -89,15 +89,20 @@ void check_error(char* response)
     if (!response || strlen(response) < 3)
         throw std::runtime_error("Invalid response");
 
-    char* saveptr;
+    char* saveptr, *aux;
+    aux = (char*)malloc(sizeof(response) * sizeof(char));
+    response[sizeof(response) - 1] = '\0';
+    strcpy(aux, response);
     char *p = strtok_r(response, " ", &saveptr);
 
     if (strncmp(p, "250", 3) != 0 && strncmp(p, "354", 3) != 0 && strncmp(p, "220", 3) != 0)
     {
-        string error = string(p) + " bad response!\n";
-        sprint(error);
+        string error(aux);
+        sprint("[CLIENT ", this_thread::get_id(), "] ", error, '\n');
+        free(aux);
         throw std::runtime_error("SMTP error");
     }
+    free(aux);
 }
 
 void send_mail(int sockfd, email mail, string smtp_domain)
@@ -111,7 +116,7 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     try
     {
         memset(response, 0, sizeof(response));
-    code = recv(sockfd, response, sizeof(response), 0);
+    code = recv(sockfd, response, sizeof(response) - 1, 0);
     error(code);
 
     check_error(response);
@@ -123,7 +128,7 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     sprint("[CLIENT ", this_thread::get_id(), "] Sent EHLO", '\n');
 
     memset(response, 0, sizeof(response));
-    code = recv(sockfd, response, sizeof(response), 0);
+    code = recv(sockfd, response, sizeof(response) - 1, 0);
     error(code);
 
     check_error(response);
@@ -135,7 +140,7 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     error(code);
 
     memset(response, 0, sizeof(response));
-    code = recv(sockfd, response, sizeof(response), 0);
+    code = recv(sockfd, response, sizeof(response) - 1, 0);
     error(code);
 
     check_error(response);
@@ -158,7 +163,7 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     error(code);
 
     memset(response, 0, sizeof(response));
-    code = SSL_read(ssl, response, sizeof(response));
+    code = SSL_read(ssl, response, sizeof(response) - 1);
     error(code);
     
     check_error(response);
@@ -170,12 +175,13 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     error(code);
     
     memset(response, 0, sizeof(response));
-    code = SSL_read(ssl, response, sizeof(response));
+    code = SSL_read(ssl, response, sizeof(response) - 1);
     error(code);
 
     check_error(response);
 
     //Sendind recipient(s)
+    bool ok = false;
     for (const auto& rec : mail.anvelopa.recipients)
     {
         char from[512];
@@ -186,10 +192,30 @@ void send_mail(int sockfd, email mail, string smtp_domain)
         error(code);
 
         memset(response, 0, sizeof(response));
-        code = SSL_read(ssl, response, sizeof(response));
+        code = SSL_read(ssl, response, sizeof(response) - 1);
         error(code);
 
-        check_error(response);
+        response[sizeof(response) - 1] = '\0';
+        if (strncmp(response, "250", 3) != 0 || strncmp(response, "251", 3) != 0)
+        {
+            sprint("[CLIENT ", this_thread::get_id(), "] Error sending the email to ", rec, '\n');
+            sprint("[CLIENT ", this_thread::get_id(), "] Error email message: ", string(response), '\n');
+        }
+        else
+            ok = true;
+
+    }
+
+    if (!ok)
+    {
+        code = SSL_write(ssl, "QUIT\r\n", 6);
+        error(code);
+
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        close(sockfd);
+        throw std::runtime_error("Error sending any of the recipients!");
     }
 
     sprint("[CLIENT ", this_thread::get_id(), "] Sent recipients and sender", '\n');
@@ -199,7 +225,7 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     error(code);
 
     memset(response, 0, sizeof(response));
-    code = SSL_read(ssl, response, sizeof(response));
+    code = SSL_read(ssl, response, sizeof(response) - 1);
     error(code);
 
     check_error(response);
@@ -231,7 +257,7 @@ void send_mail(int sockfd, email mail, string smtp_domain)
     sprint("[CLIENT ", this_thread::get_id(), "] Sent body", '\n');
 
     memset(response, 0, sizeof(response));
-    code = SSL_read(ssl, response, sizeof(response));
+    code = SSL_read(ssl, response, sizeof(response) - 1);
     error(code);
 
     check_error(response);
@@ -256,7 +282,7 @@ void send_mail(int sockfd, email mail, string smtp_domain)
             SSL_CTX_free(ctx);
         }
         close(sockfd);
-    }   
+    }
 }
 
 SPFvalidation is_ehlo_good(char response[])

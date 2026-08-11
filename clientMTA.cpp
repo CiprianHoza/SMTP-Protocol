@@ -128,16 +128,13 @@ void handle_conn(int client_fd, SSL_CTX* ctx, string smtp_domain, string mail_do
             return;
         }
 
-        true_mail.corp.headers["Message-ID"] = "<" + to_string(time(nullptr)) + "@" + mail_domain + ">";
-        true_mail.corp.headers["Date"] = get_date();
+        if (true_mail.corp.headers["Message-ID"].empty())
+            true_mail.corp.headers["Message-ID"] = "<" + to_string(time(nullptr)) + "@" + mail_domain + ">";
 
-        if (next_step(true_mail, smtp_domain, PORT, mail_domain) == -1)
-        {
-            sprint("[CLIENT ", this_thread::get_id(), "] Error trying sending the email...", '\n');
-            return;
-        }
+        if (true_mail.corp.headers["Date"].empty())
+            true_mail.corp.headers["Date"] = get_date();
 
-        sprint("[CLIENT ", this_thread::get_id(), "] Email sent!", '\n');
+        next_step(true_mail, smtp_domain, PORT, mail_domain);
 }
 
 int main(void)
