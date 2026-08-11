@@ -1460,7 +1460,13 @@ bool deliver_to_dovecot_lmtp(email& mail)
         return false;
     }
 
-    string payload = mail.corp.raw_mail;
+    string payload;
+
+    auto it = mail.corp.headers.find("X-Spam-Flag");
+    if (it != mail.corp.headers.end() && it->second == "YES")
+        payload += "X-Spam-Flag: YES\r\n";
+    
+    payload += mail.corp.raw_mail;
 
     if (payload.length() < 2 || payload.substr(payload.length() - 2) != "\r\n")
         payload += "\r\n";
