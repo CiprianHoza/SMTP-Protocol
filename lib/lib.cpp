@@ -204,11 +204,16 @@ void send_mail(int sockfd, email mail, string smtp_domain, string mail_domain, s
             sprint("[CLIENT ", this_thread::get_id(), "] Error email message: ", string(response), '\n');
 
             if (!(mail.anvelopa.sender.rfind("mail_daemon", 0) == 0 || mail.anvelopa.sender.empty()))
-            {
-                thread t(send_delivery_error, mail.anvelopa.sender, mail_domain, rec, string(response), smtp_domain, PORT);
-
-                t.detach();
-            }
+                std::thread([=]() {
+                    try
+                    {
+                        send_delivery_error(mail.anvelopa.sender, mail_domain, rec, string(response), smtp_domain, PORT);
+                    }
+                    catch(const std::exception& e)
+                    {
+                        sprint("[CLIENT ERROR ", this_thread::get_id(), "] ", e.what(), '\n');
+                    }
+                }).detach();
         }
         else
             ok = true;
@@ -293,14 +298,15 @@ void send_mail(int sockfd, email mail, string smtp_domain, string mail_domain, s
             return;
         }
 
-        try
-        {
-            send_delivery_error(mail.anvelopa.sender, mail_domain, "", string(e.what()), smtp_domain, PORT);
-        }
-        catch(const std::exception& e)
-        {
-            sprint("[MTA Client error ", this_thread::get_id(), "] ", e.what(), '\n');
-        }      
+        if (string(e.what()) != "Error sending any of the recipients!")
+            try
+            {
+                send_delivery_error(mail.anvelopa.sender, mail_domain, "", string(e.what()), smtp_domain, PORT);
+            }
+            catch(const std::exception& e)
+            {
+                sprint("[MTA Client error ", this_thread::get_id(), "] ", e.what(), '\n');
+            }      
     }
 }
 
@@ -2214,10 +2220,12 @@ void send_delivery_error(string address, string mail_domain, string rec, string 
     mail.corp.headers["User-Agent"] = "SMTP server";
     mail.corp.headers["Content-Language"] = "en";
     mail.corp.headers["Content-Transfer-Encoding"] = "7bit";
-    mail.corp.headers["Content-Type"] = "text/plain; charset=UTF-8; format=flowed";
+    mail.corp.headers["Content-Type"] = "text/plain; charset=UTF-8;";
     mail.corp.headers["MIME-Version"] = "1.0";
-    mail.corp.headers["Message-ID"] = "<" + to_string(time(nullptr)) + "@test-projects.dev>";
+    mail.corp.headers["Message-ID"] = "<" + to_string(time(nullptr)) + ".DSN@" + mail_domain + ">";
     mail.corp.headers["Date"] = get_date();
+    mail.corp.headers["Auto-Submitted"] = "auto-replied";
+    mail.corp.headers["Precedence"] = "bulk";
 
     if (rec == "")
         mail.corp.body = "Could not send the email!\n";
