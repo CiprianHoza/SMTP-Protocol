@@ -110,7 +110,7 @@ int next_step(email mail, string smtp_domain, string PORT, string mail_domain)
             temp.anvelopa.recipients.push_back(rec + "@" + domain);
 
         sprint("[CLIENT ", this_thread::get_id(), "] SSL library loaded. Sending mail...", '\n');
-        send_mail(sockfd, temp, smtp_domain);
+        send_mail(sockfd, temp, smtp_domain, mail_domain, PORT);
     }
 
         return 0;

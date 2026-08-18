@@ -24,7 +24,7 @@ class ThreadPrint
 inline constexpr ThreadPrint sprint;
 
 //send email
-extern void send_mail(int sockfd, email mail, string smtp_domain);
+extern void send_mail(int sockfd, email mail, string smtp_domain, string mail_domain, string PORT);
 
 //receive email
 extern email receive_email(int sockfd, SSL_CTX* ctx, string smtp_domain, string mail_domain);

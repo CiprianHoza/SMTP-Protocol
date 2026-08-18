@@ -73,6 +73,7 @@ string canonicalize_body_relaxed(const string& body);
 string sign_dkim_openssl(const email& mail, const string& domain, const string& selector, const string& key_path);
 bool verify_dkim(const email& mail);
 DMARCresult verify_dmarc(const email& mail, bool spf_pass, const string& spf_domain, bool dkim_pass, const string& dkim_domain);
+void send_delivery_error(string address, string mail_domain, string rec, string error, string smtp_domain, string PORT);
 
 
 void error(int code)
@@ -98,20 +99,21 @@ void check_error(char* response)
     if (strncmp(p, "250", 3) != 0 && strncmp(p, "354", 3) != 0 && strncmp(p, "220", 3) != 0)
     {
         string error(aux);
-        sprint("[CLIENT ", this_thread::get_id(), "] ", error, '\n');
+        sprint("[CLIENT ", this_thread::get_id(), "] ", "SMTP error", '\n');
         free(aux);
-        throw std::runtime_error("SMTP error");
+        throw std::runtime_error(error);
     }
     free(aux);
 }
 
-void send_mail(int sockfd, email mail, string smtp_domain)
+void send_mail(int sockfd, email mail, string smtp_domain, string mail_domain, string PORT)
 {
     int code;
     char response[1024];
 
     SSL* ssl = nullptr;
     SSL_CTX* ctx = nullptr;
+    vector<string> not_sent;
 
     try
     {
@@ -200,10 +202,16 @@ void send_mail(int sockfd, email mail, string smtp_domain)
         {
             sprint("[CLIENT ", this_thread::get_id(), "] Error sending the email to ", rec, '\n');
             sprint("[CLIENT ", this_thread::get_id(), "] Error email message: ", string(response), '\n');
+
+            if (!(mail.anvelopa.sender.rfind("mail_daemon", 0) == 0 || mail.anvelopa.sender.empty()))
+            {
+                thread t(send_delivery_error, mail.anvelopa.sender, mail_domain, rec, string(response), smtp_domain, PORT);
+
+                t.detach();
+            }
         }
         else
             ok = true;
-
     }
 
     if (!ok)
@@ -278,6 +286,21 @@ void send_mail(int sockfd, email mail, string smtp_domain)
             SSL_CTX_free(ctx);
         }
         close(sockfd);
+
+        if (mail.anvelopa.sender.empty() || mail.anvelopa.sender.rfind("mail_daemon", 0) == 0)
+        {
+            sprint("[MTA Client error ", this_thread::get_id(), "] Dropping bounce loop for daemon message", '\n');
+            return;
+        }
+
+        try
+        {
+            send_delivery_error(mail.anvelopa.sender, mail_domain, "", string(e.what()), smtp_domain, PORT);
+        }
+        catch(const std::exception& e)
+        {
+            sprint("[MTA Client error ", this_thread::get_id(), "] ", e.what(), '\n');
+        }      
     }
 }
 
@@ -2175,4 +2198,66 @@ DMARCresult verify_dmarc(const email& mail, bool spf_pass, const string& spf_dom
     }
     
     return result;
+}
+
+void send_delivery_error(string address, string mail_domain, string rec, string error, string smtp_domain, string PORT)
+{
+    email mail;
+    int sockfd;
+
+    mail.anvelopa.sender = "mail_daemon@" + mail_domain;
+    mail.anvelopa.recipients.push_back(address);
+
+    mail.corp.headers["From"] = "Mail Delivery Subsystem <" + mail.anvelopa.sender + ">";
+    mail.corp.headers["To"] = address;
+    mail.corp.headers["Subject"] = "Mail Delivery Failure";
+    mail.corp.headers["User-Agent"] = "SMTP server";
+    mail.corp.headers["Content-Language"] = "en";
+    mail.corp.headers["Content-Transfer-Encoding"] = "7bit";
+    mail.corp.headers["Content-Type"] = "text/plain; charset=UTF-8; format=flowed";
+    mail.corp.headers["MIME-Version"] = "1.0";
+    mail.corp.headers["Message-ID"] = "<" + to_string(time(nullptr)) + "@test-projects.dev>";
+    mail.corp.headers["Date"] = get_date();
+
+    if (rec == "")
+        mail.corp.body = "Could not send the email!\n";
+    else
+    {
+        mail.corp.body = "Could not send the email to " + rec + '\n';
+    }
+
+    mail.corp.body += "Server response is:\n";
+    mail.corp.body += error;
+
+    struct addrinfo hints, *result = nullptr;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int code = getaddrinfo(smtp_domain.c_str(), PORT.c_str(), &hints, &result);
+    if (code != 0 || !result)
+    {
+        sprint("[CLIENT ", this_thread::get_id(), "] DNS lookup failed for MX: ", smtp_domain, '\n');
+        throw std::runtime_error("Mail Delivery Subsystem failure");
+    }
+
+    sockfd = socket(AF_INET, SOCK_STREAM, result->ai_protocol);
+
+    if (sockfd < 0)
+    {
+        freeaddrinfo(result);
+        throw std::runtime_error("Mail Delivery Subsystem failure");
+    }
+
+    if (connect(sockfd, result->ai_addr, result->ai_addrlen) < 0)
+    {
+        sprint("[CLIENT ", this_thread::get_id(), "] Cannot connect to MX: ", smtp_domain);
+        close(sockfd);
+        freeaddrinfo(result);
+        throw std::runtime_error("Mail Delivery Subsystem failure");
+    }
+    sprint("[CLIENT ", this_thread::get_id(), "] Socket connection established with MX: ", smtp_domain, '\n');
+    freeaddrinfo(result);
+
+    send_mail(sockfd, mail, smtp_domain, mail_domain, PORT);
 }
